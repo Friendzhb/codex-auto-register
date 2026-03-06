@@ -1,0 +1,22 @@
+{
+  "_comment": "ChatGPT(QQ IMAP + Cloudflare Route)",
+  "total_accounts": 3,
+
+  "qq_email": "你的qq 邮箱",
+  "qq_imap_password": "你的QQ邮箱授权码",
+  "forward_domain": "你的域名",
+
+  "proxy": "",
+
+  "output_file": "registered_accounts.txt",
+  "enable_oauth": true,
+  "oauth_required": true,
+  "oauth_issuer": "https://auth.openai.com",
+  "oauth_client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+  "oauth_redirect_uri": "http://localhost:1455/auth/callback",
+  "ak_file": "ak.txt",
+  "rk_file": "rk.txt",
+  "token_json_dir": "codex_tokens",
+  "upload_api_url": "",
+  "upload_api_token": ""
+}
