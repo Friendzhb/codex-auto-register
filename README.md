@@ -61,10 +61,14 @@ pip3 install -r requirements.txt
 python3 -m pip install --upgrade pip
 pip3 install -r requirements.txt
 
+# ⚠️ 若提示 curl_cffi 找不到合适版本（常见于阿里云等国内镜像源），
+#    请改用官方 PyPI 源安装：
+pip3 install -r requirements.txt -i https://pypi.org/simple/
+
 # 若使用虚拟环境（推荐隔离环境）：
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -i https://pypi.org/simple/
 ```
 
 ### 5. 编辑配置
@@ -146,7 +150,8 @@ python3 chatgpt_register.py
 | ---- | ---- | -------- |
 | `❌ 启动失败 — 缺少 MOEMAIL_API_KEY` | config.json 未填 API Key | 填写 `moemail_api_key` 字段 |
 | `❌ config.json 解析失败` | JSON 格式错误 | 执行 `python3 -m json.tool config.json` 检查 |
-| `ModuleNotFoundError: curl_cffi` | 未安装依赖 | 执行 `pip3 install -r requirements.txt` |
+| `ModuleNotFoundError: curl_cffi` | 未安装依赖 | 执行 `pip3 install -r requirements.txt -i https://pypi.org/simple/` |
+| `Could not find a version that satisfies the requirement curl_cffi>=0.7.0` | 国内镜像源（如阿里云）不含该版本 | 改用官方源：`pip3 install -r requirements.txt -i https://pypi.org/simple/` |
 | `Could not find a version that satisfies the requirement requests>=...` | pip 版本过旧，无法解析新版包 | 先升级 pip：`python3 -m pip install --upgrade pip`，再重新安装依赖 |
 | `No matching distribution found for urllib3>=...` | pip 版本过旧或镜像源缺少新版 | 升级 pip 或换用 pypi 官方源：`pip3 install -r requirements.txt -i https://pypi.org/simple/` |
 | 注册失败率高 | IP 被 CF 拦截 | 配置 `proxy` 或启动 FlareSolverr |
