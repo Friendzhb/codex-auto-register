@@ -17,9 +17,10 @@
   "concurrent_workers": 8,
   "headless": false,
   "proxy": "http://127.0.0.1:7890",
-  "cf_worker_domain": "你的 Cloudflare Worker 域名",
-  "cf_email_domain": "你的 Cloudflare 邮箱域名",
-  "cf_admin_password": "你的 Cloudflare 管理密码",
+  "moemail_api_url": "https://mail.zhouhongbin.top",
+  "moemail_api_key": "你的 MoeMail API Key",
+  "moemail_domain": "moemail.app",
+  "moemail_expiry_time": 3600000,
   "upload_api_url": "https://你的CPA地址/v0/management/auth-files",
   "upload_api_token": "你的CPA密码",
   "cli_proxy_api_base": "你的CPA基础URL",
@@ -33,9 +34,12 @@
 | total_accounts | 生成账号数量 |
 | concurrent_workers | 并发数 |
 | proxy | 代理地址 |
-| cf_worker_domain | Cloudflare Worker 域名 |
+| moemail_api_key | MoeMail API Key（优先使用） |
+| moemail_domain | MoeMail 邮箱域名 |
 | upload_api_url | CPA 上传 API |
 | cli_proxy_api_base | CPA CLI 代理 API |
+
+> 默认已切换为与 ChatGPT 脚本一致的 MoeMail 临时邮箱服务；若未配置 `moemail_api_key`，代码会继续回退使用旧的 Cloudflare Worker 配置。
 
 ## 使用
 
