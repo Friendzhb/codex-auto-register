@@ -177,7 +177,8 @@ def _validate_startup_config():
         sys.exit(1)
 
 
-_validate_startup_config()
+# _validate_startup_config() is called inside main() so interactive input
+# can supply missing values before the check runs.
 
 # 全局线程锁
 _print_lock = threading.Lock()
