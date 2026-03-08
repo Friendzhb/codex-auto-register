@@ -19,8 +19,8 @@
 
 | 组件        | 最低版本 |
 | ----------- | -------- |
-| Python      | 3.10+    |
-| pip         | 22+      |
+| Python      | 3.8+     |
+| pip         | 19+      |
 | 网络        | 能访问 OpenAI / MoeMail API（可走代理） |
 
 ### 2. 克隆代码
@@ -30,15 +30,44 @@ git clone https://github.com/Friendzhb/codex-auto-register.git
 cd codex-auto-register
 ```
 
-### 3. 安装依赖
+### 3. 升级 pip（推荐）
+
+如果 pip 版本过旧（低于 19），建议先升级，否则可能出现找不到依赖包的错误：
 
 ```bash
-pip install -r requirements.txt
-# 若系统 Python 3 和 pip 分开，用：
-pip3 install -r requirements.txt
+# 方式一：使用 pip 自升级（推荐）
+python3 -m pip install --upgrade pip
+
+# 方式二：使用系统包管理器（CentOS/RHEL）
+yum install -y python3-pip
+
+# 方式三：使用系统包管理器（Debian/Ubuntu）
+apt-get install -y python3-pip
 ```
 
-### 4. 编辑配置
+升级后确认版本：
+
+```bash
+pip3 --version
+```
+
+### 4. 安装依赖
+
+```bash
+# 安装所有依赖（推荐，一条命令搞定）
+pip3 install -r requirements.txt
+
+# 若上述命令报 "Could not find a version" 错误，尝试先升级 pip 再安装：
+python3 -m pip install --upgrade pip
+pip3 install -r requirements.txt
+
+# 若使用虚拟环境（推荐隔离环境）：
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 5. 编辑配置
 
 ```bash
 cp config.json config.json.bak   # 先备份
@@ -54,7 +83,7 @@ nano config.json                  # 或用 vim / vi
 | `concurrent_workers` | 并发线程数（建议 1–5，视服务器带宽）  |
 | `proxy`              | 代理地址，如 `http://127.0.0.1:7890`（无代理留空） |
 
-### 5. （可选）启动 FlareSolverr
+### 6. （可选）启动 FlareSolverr
 
 若 OpenAI 触发 Cloudflare 验证，先在本机启动 FlareSolverr：
 
@@ -76,7 +105,7 @@ docker run -d \
 
 不需要 FlareSolverr 时将该字段留空即可。
 
-### 6. 运行
+### 7. 运行
 
 **交互模式**（推荐首次测试）：
 
@@ -111,13 +140,15 @@ python3 chatgpt_register.py
 # tmux attach -t register  →  重连
 ```
 
-### 7. 常见部署问题
+### 8. 常见部署问题
 
 | 现象 | 原因 | 解决办法 |
 | ---- | ---- | -------- |
 | `❌ 启动失败 — 缺少 MOEMAIL_API_KEY` | config.json 未填 API Key | 填写 `moemail_api_key` 字段 |
 | `❌ config.json 解析失败` | JSON 格式错误 | 执行 `python3 -m json.tool config.json` 检查 |
 | `ModuleNotFoundError: curl_cffi` | 未安装依赖 | 执行 `pip3 install -r requirements.txt` |
+| `Could not find a version that satisfies the requirement requests>=...` | pip 版本过旧，无法解析新版包 | 先升级 pip：`python3 -m pip install --upgrade pip`，再重新安装依赖 |
+| `No matching distribution found for urllib3>=...` | pip 版本过旧或镜像源缺少新版 | 升级 pip 或换用 pypi 官方源：`pip3 install -r requirements.txt -i https://pypi.org/simple/` |
 | 注册失败率高 | IP 被 CF 拦截 | 配置 `proxy` 或启动 FlareSolverr |
 | SSH 断开后程序停止 | 未用 screen/tmux | 用 `nohup` 或 `screen`/`tmux` 运行 |
 
