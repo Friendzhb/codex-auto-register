@@ -27,6 +27,7 @@ def _load_config():
     """从 config.json 加载配置，环境变量优先级更高"""
     config = {
         "total_accounts": 3,
+        "concurrent_workers": 3,
         "moemail_api_url": "https://mail.zhouhongbin.top",
         "moemail_api_key": "",
         "moemail_domain": "moemail.app",
@@ -54,8 +55,17 @@ def _load_config():
             with open(config_path, "r", encoding="utf-8") as f:
                 file_config = json.load(f)
                 config.update(file_config)
+        except json.JSONDecodeError as e:
+            print(
+                f"\n❌ config.json 解析失败: {e}\n"
+                f"   文件: {config_path}\n"
+                f"   请用以下命令验证 JSON 格式:\n"
+                f"     python3 -m json.tool config.json\n",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         except Exception as e:
-            print(f"⚠️ 加载 config.json 失败: {e}")
+            print(f"⚠️ 加载 config.json 失败: {e}", file=sys.stderr)
 
     # 环境变量优先级更高
     config["moemail_api_url"] = os.environ.get("MOEMAIL_API_URL", config["moemail_api_url"])
@@ -64,10 +74,17 @@ def _load_config():
     try:
         config["moemail_expiry_time"] = int(os.environ.get("MOEMAIL_EXPIRY_TIME", config["moemail_expiry_time"]))
     except (ValueError, TypeError):
-        print("⚠️ MOEMAIL_EXPIRY_TIME 格式无效，使用默认值 3600000")
+        print("⚠️ MOEMAIL_EXPIRY_TIME 格式无效，使用默认值 3600000", file=sys.stderr)
         config["moemail_expiry_time"] = 3600000
     config["proxy"] = os.environ.get("PROXY", config["proxy"])
-    config["total_accounts"] = int(os.environ.get("TOTAL_ACCOUNTS", config["total_accounts"]))
+    try:
+        config["total_accounts"] = int(os.environ.get("TOTAL_ACCOUNTS", config["total_accounts"]))
+    except (ValueError, TypeError):
+        config["total_accounts"] = 3
+    try:
+        config["concurrent_workers"] = int(os.environ.get("CONCURRENT_WORKERS", config["concurrent_workers"]))
+    except (ValueError, TypeError):
+        config["concurrent_workers"] = 3
     config["enable_oauth"] = os.environ.get("ENABLE_OAUTH", config["enable_oauth"])
     config["oauth_required"] = os.environ.get("OAUTH_REQUIRED", config["oauth_required"])
     config["oauth_issuer"] = os.environ.get("OAUTH_ISSUER", config["oauth_issuer"])
@@ -124,11 +141,43 @@ UPLOAD_API_TOKEN = _CONFIG["upload_api_token"]
 FLARESOLVERR_URL = _CONFIG.get("flaresolverr_url", "").strip()
 FLARESOLVERR_REFRESH_INTERVAL = int(_CONFIG.get("flaresolverr_refresh_interval", 600))
 FLARESOLVERR_TIMEOUT = int(_CONFIG.get("flaresolverr_timeout", 60))
+DEFAULT_CONCURRENT_WORKERS = _CONFIG.get("concurrent_workers", 3)
 
-if not MOEMAIL_API_KEY:
-    print("⚠️ 警告: 未设置 MOEMAIL_API_KEY，请在 config.json 中设置或设置环境变量")
-    print("   文件: config.json -> moemail_api_key")
-    print("   环境变量: export MOEMAIL_API_KEY='your_api_key_here'")
+_PLACEHOLDER_API_KEY = "YOUR_API_KEY"
+
+
+def _eprint(*args, **kwargs):
+    """将错误/警告信息输出到 stderr，确保即使 stdout 被重定向也能在终端看到。"""
+    print(*args, file=sys.stderr, **kwargs)
+
+
+def _validate_startup_config():
+    """
+    启动时校验必要的配置项。
+    发现致命问题时将错误信息输出到 stderr 并以状态码 1 退出。
+    """
+    errors = []
+
+    # MoeMail API Key 是必需的
+    key = (MOEMAIL_API_KEY or "").strip()
+    if not key or key.upper() == _PLACEHOLDER_API_KEY.upper():
+        errors.append(
+            "缺少 MOEMAIL_API_KEY\n"
+            "     → 在 config.json 中填写:  \"moemail_api_key\": \"your_key\"\n"
+            "     → 或设置环境变量:          export MOEMAIL_API_KEY=your_key"
+        )
+
+    if errors:
+        _eprint("\n" + "=" * 62)
+        _eprint("  ❌ 启动失败 — 配置校验未通过，请修复后重新运行")
+        _eprint("=" * 62)
+        for i, err in enumerate(errors, 1):
+            _eprint(f"\n  [{i}] {err}")
+        _eprint("\n" + "=" * 62 + "\n")
+        sys.exit(1)
+
+
+_validate_startup_config()
 
 # 全局线程锁
 _print_lock = threading.Lock()
@@ -1756,7 +1805,26 @@ def main():
     print("  ChatGPT 批量自动注册工具 (MoeMail 临时邮箱版)")
     print("=" * 60)
 
-    # 交互式代理配置
+    # ── 非交互模式 ──────────────────────────────────────────────
+    # 当 stdin 不是终端时（nohup / 后台运行 / 管道重定向），跳过所有
+    # input() 调用，直接使用 config.json 或环境变量中的参数。
+    if not sys.stdin.isatty():
+        print("[Info] 非交互模式：直接使用 config.json / 环境变量中的配置")
+        proxy = DEFAULT_PROXY or None
+        if proxy:
+            print(f"[Info] 使用代理: {proxy}")
+        else:
+            print("[Info] 不使用代理")
+        print(f"[Info] 注册数量: {DEFAULT_TOTAL_ACCOUNTS}  并发数: {DEFAULT_CONCURRENT_WORKERS}")
+        run_batch(
+            total_accounts=DEFAULT_TOTAL_ACCOUNTS,
+            output_file=DEFAULT_OUTPUT_FILE,
+            max_workers=DEFAULT_CONCURRENT_WORKERS,
+            proxy=proxy,
+        )
+        return
+
+    # ── 交互模式 ─────────────────────────────────────────────────
     proxy = DEFAULT_PROXY
     if proxy:
         print(f"[Info] 检测到默认代理: {proxy}")
@@ -1764,8 +1832,7 @@ def main():
         if use_default == "n":
             proxy = input("输入代理地址 (留空=不使用代理): ").strip() or None
     else:
-        env_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") \
-                 or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")
+        env_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")
         if env_proxy:
             print(f"[Info] 检测到环境变量代理: {env_proxy}")
             use_env = input("使用此代理? (Y/n): ").strip().lower()
@@ -1781,12 +1848,16 @@ def main():
     else:
         print("[Info] 不使用代理")
 
-    # 输入注册数量
     count_input = input(f"\n注册账号数量 (默认 {DEFAULT_TOTAL_ACCOUNTS}): ").strip()
-    total_accounts = int(count_input) if count_input.isdigit() and int(count_input) > 0 else DEFAULT_TOTAL_ACCOUNTS
+    total_accounts = (
+        int(count_input) if count_input.isdigit() and int(count_input) > 0 else DEFAULT_TOTAL_ACCOUNTS
+    )
 
-    workers_input = input("并发数 (默认 3): ").strip()
-    max_workers = int(workers_input) if workers_input.isdigit() and int(workers_input) > 0 else 3
+    workers_input = input(f"并发数 (默认 {DEFAULT_CONCURRENT_WORKERS}): ").strip()
+    max_workers = (
+        int(workers_input) if workers_input.isdigit() and int(workers_input) > 0
+        else DEFAULT_CONCURRENT_WORKERS
+    )
 
     run_batch(total_accounts=total_accounts, output_file=DEFAULT_OUTPUT_FILE,
               max_workers=max_workers, proxy=proxy)

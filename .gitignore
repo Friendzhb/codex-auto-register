@@ -1,2 +1,16 @@
 __pycache__/
 *.py[cod]
+
+# 运行产出文件（不提交到版本库）
+registered_accounts.txt
+registered_accounts.json
+registered_accounts.csv
+accounts.txt
+ak.txt
+rk.txt
+codex_tokens/
+*.json.bak
+
+# 个人环境变量文件
+.env
+.env.local

@@ -9,19 +9,126 @@
 - 🔄 自动处理 OAuth 登录协议及环境检测
 - ☁️ 支持代理配置防止 IP 风控
 - 🛡️ 集成 FlareSolverr 自动绕过 Cloudflare 人机验证（CF Clearance + 浏览器指纹 + User-Agent）
-- 📤 提取出极其符合业务标准 `auth.json` 结构的凭证，可直通下游面板
+- �� 提取出极其符合业务标准 `auth.json` 结构的凭证，可直通下游面板
 
-## 环境
+---
+
+## Linux 服务器部署
+
+### 1. 系统要求
+
+| 组件        | 最低版本 |
+| ----------- | -------- |
+| Python      | 3.10+    |
+| pip         | 22+      |
+| 网络        | 能访问 OpenAI / MoeMail API（可走代理） |
+
+### 2. 克隆代码
 
 ```bash
-pip install curl_cffi
+git clone https://github.com/Friendzhb/codex-auto-register.git
+cd codex-auto-register
 ```
+
+### 3. 安装依赖
+
+```bash
+pip install -r requirements.txt
+# 若系统 Python 3 和 pip 分开，用：
+pip3 install -r requirements.txt
+```
+
+### 4. 编辑配置
+
+```bash
+cp config.json config.json.bak   # 先备份
+nano config.json                  # 或用 vim / vi
+```
+
+**必填项**：
+
+| 字段                 | 说明                                  |
+| -------------------- | ------------------------------------- |
+| `moemail_api_key`    | MoeMail API Key（必须，否则无法收信） |
+| `total_accounts`     | 本次注册账号数量                      |
+| `concurrent_workers` | 并发线程数（建议 1–5，视服务器带宽）  |
+| `proxy`              | 代理地址，如 `http://127.0.0.1:7890`（无代理留空） |
+
+### 5. （可选）启动 FlareSolverr
+
+若 OpenAI 触发 Cloudflare 验证，先在本机启动 FlareSolverr：
+
+```bash
+# 需要已安装 Docker
+docker run -d \
+  --name flaresolverr \
+  -p 8191:8191 \
+  -e LOG_LEVEL=info \
+  --restart unless-stopped \
+  ghcr.io/flaresolverr/flaresolverr:latest
+```
+
+然后在 `config.json` 中设置：
+
+```json
+"flaresolverr_url": "http://localhost:8191"
+```
+
+不需要 FlareSolverr 时将该字段留空即可。
+
+### 6. 运行
+
+**交互模式**（推荐首次测试）：
+
+```bash
+python3 chatgpt_register.py
+```
+
+**非交互/后台模式**（参数全从 config.json 读取，适合定时任务或 `nohup`）：
+
+```bash
+# nohup 后台运行，日志写到 run.log
+nohup python3 chatgpt_register.py > run.log 2>&1 &
+echo "PID: $!"
+
+# 实时查看日志
+tail -f run.log
+```
+
+**screen / tmux 会话**（断开 SSH 后继续运行）：
+
+```bash
+# screen
+screen -S register
+python3 chatgpt_register.py
+# Ctrl+A D  →  退出 screen，程序在后台继续
+# screen -r register  →  重连
+
+# tmux
+tmux new -s register
+python3 chatgpt_register.py
+# Ctrl+B D  →  退出 tmux，程序在后台继续
+# tmux attach -t register  →  重连
+```
+
+### 7. 常见部署问题
+
+| 现象 | 原因 | 解决办法 |
+| ---- | ---- | -------- |
+| `❌ 启动失败 — 缺少 MOEMAIL_API_KEY` | config.json 未填 API Key | 填写 `moemail_api_key` 字段 |
+| `❌ config.json 解析失败` | JSON 格式错误 | 执行 `python3 -m json.tool config.json` 检查 |
+| `ModuleNotFoundError: curl_cffi` | 未安装依赖 | 执行 `pip3 install -r requirements.txt` |
+| 注册失败率高 | IP 被 CF 拦截 | 配置 `proxy` 或启动 FlareSolverr |
+| SSH 断开后程序停止 | 未用 screen/tmux | 用 `nohup` 或 `screen`/`tmux` 运行 |
+
+---
 
 ## 配置 (config.json)
 
 ```json
 {
   "total_accounts": 5,
+  "concurrent_workers": 3,
   "moemail_api_url": "https://mail.zhouhongbin.top",
   "moemail_api_key": "YOUR_API_KEY",
   "moemail_domain": "moemail.app",
@@ -36,36 +143,36 @@ pip install curl_cffi
 }
 ```
 
-| 配置项                          | 说明                                            |
-| ------------------------------- | ----------------------------------------------- |
-| total_accounts                  | 注册账号数量                                    |
-| moemail_api_url                 | MoeMail API 地址                                |
-| moemail_api_key                 | MoeMail API Key                                 |
-| moemail_domain                  | MoeMail 邮箱域名                                |
-| proxy                           | 代理地址 (可选，防止主IP被墙。推荐使用)         |
-| flaresolverr_url                | FlareSolverr 服务地址（留空则禁用）             |
-| flaresolverr_refresh_interval   | CF Clearance 刷新间隔（秒），默认 600           |
-| flaresolverr_timeout            | Cloudflare 挑战超时（秒），默认 60              |
-| output_file                     | 纯文本格式输出的文件名                          |
-| enable_oauth                    | 开启提取下游面板用的全量 Auth token（必需）     |
+| 配置项                          | 说明                                                  |
+| ------------------------------- | ----------------------------------------------------- |
+| `total_accounts`                | 注册账号数量                                          |
+| `concurrent_workers`            | 并发线程数（同时注册的账号数）                        |
+| `moemail_api_url`               | MoeMail API 地址                                      |
+| `moemail_api_key`               | MoeMail API Key（**必填**）                           |
+| `moemail_domain`                | MoeMail 邮箱域名                                      |
+| `proxy`                         | 代理地址（可选，防止主 IP 被风控）                    |
+| `flaresolverr_url`              | FlareSolverr 服务地址（留空则禁用）                   |
+| `flaresolverr_refresh_interval` | CF Clearance 刷新间隔（秒），默认 600                 |
+| `flaresolverr_timeout`          | Cloudflare 挑战超时（秒），默认 60                    |
+| `output_file`                   | 账号明文输出文件名                                    |
+| `enable_oauth`                  | 是否同步获取 Codex OAuth Token                        |
+
+### 环境变量覆盖（优先级高于 config.json）
+
+所有配置项均可通过同名大写环境变量覆盖，无需修改 config.json：
+
+```bash
+export MOEMAIL_API_KEY=your_key
+export TOTAL_ACCOUNTS=10
+export CONCURRENT_WORKERS=3
+export PROXY=http://127.0.0.1:7890
+export FLARESOLVERR_URL=http://localhost:8191
+```
 
 ## FlareSolverr 配置
 
 本工具支持通过本地 [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) 服务自动绕过 Cloudflare 人机验证，
 获取 `cf_clearance` cookie、浏览器指纹及 User-Agent，无需手动干预。
-
-### 部署 FlareSolverr（Docker，一键启动）
-
-```bash
-docker run -d \
-  --name flaresolverr \
-  -p 8191:8191 \
-  -e LOG_LEVEL=info \
-  --restart unless-stopped \
-  ghcr.io/flaresolverr/flaresolverr:latest
-```
-
-### 参数说明
 
 | 参数                            | 说明                                              | 默认值                  |
 | ------------------------------- | ------------------------------------------------- | ----------------------- |
@@ -73,19 +180,9 @@ docker run -d \
 | `flaresolverr_refresh_interval` | CF Clearance 缓存有效期（秒），到期后自动刷新     | `600`                   |
 | `flaresolverr_timeout`          | Cloudflare 挑战最大等待时间（秒）                 | `60`                    |
 
-### 环境变量覆盖
-
-| 环境变量                        | 对应配置项                        |
-| ------------------------------- | --------------------------------- |
-| `FLARESOLVERR_URL`              | `flaresolverr_url`                |
-| `FLARESOLVERR_REFRESH_INTERVAL` | `flaresolverr_refresh_interval`   |
-| `FLARESOLVERR_TIMEOUT`          | `flaresolverr_timeout`            |
-
 > 当 `flaresolverr_url` 留空时，工具退回到 curl_cffi 的内置浏览器指纹模式（仍可正常运行）。
 
 ## CPA 面板集成 (可选)
-
-注册完成及跑通授权后，工具可将账号直推至内部管理的 CPA：
 
 | 配置项           | 说明                                | 参考                           |
 | ---------------- | ----------------------------------- | ------------------------------ |
@@ -94,35 +191,20 @@ docker run -d \
 
 > 该操作若留空则不执行推流网络请求，仅在本地生成产物
 
-## 使用
-
-```bash
-python chatgpt_register.py
-```
-
 ## 产出物结构
 
-工具跑完后，除传统的文本外，现在会严格输出高标准的自动投喂 JSON 文件到工作目录：
-
-1. **总账户数据追踪集成**: `registered_accounts.json`
-   - 以数组呈现，每个单元包含：`id`, `email`, `tokens`, `created_at`, `last_used`
-2. **每账号单独立属隔离源**: `codex_tokens/{email}/auth.json`
-   - 精简内容：`tokens.id_token`, `tokens.access_token`, `tokens.refresh_token`
-
-## 目录结构
-
 ```
-chatgpt_register/
-├── chatgpt_register.py      # 主程序
-├── config.json              # 配置文件
-├── README.md                # 本文档
-├── registered_accounts.json # 全局聚合产出账号
-├── codex_tokens/            # （每个账号一个文件夹 auth.json）
-│   ├── account_a@doma.in/
-│   │   └── auth.json
-├── registered_accounts.txt  # 传统简单输出列表
-├── ak.txt                   # Access Keys 流
-└── rk.txt                   # Refresh Keys 流
+codex-auto-register/
+├── chatgpt_register.py       # 主程序
+├── config.json               # 配置文件
+├── requirements.txt          # Python 依赖
+├── registered_accounts.json  # 全局聚合产出账号（JSON 数组）
+├── registered_accounts.txt   # 账号明文列表
+├── codex_tokens/             # 每个账号独立 auth.json
+│   └── account@domain.com/
+│       └── auth.json
+├── ak.txt                    # Access Token 列表
+└── rk.txt                    # Refresh Token 列表
 ```
 
 ## 注意事项

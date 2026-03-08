@@ -80,9 +80,24 @@ def load_config():
     """加载外部配置文件"""
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
     if not os.path.exists(config_path):
-        raise FileNotFoundError(f"config.json 未找到: {config_path}")
-    with open(config_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        print(
+            f"\n❌ 配置文件未找到: {config_path}\n"
+            f"   请将 codex/config.json 复制到该目录并填写相关配置。\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        print(
+            f"\n❌ config.json 解析失败: {e}\n"
+            f"   文件: {config_path}\n"
+            f"   请用以下命令检查 JSON 格式:\n"
+            f"     python3 -m json.tool {config_path}\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 _config = load_config()
@@ -126,14 +141,57 @@ OAUTH_REDIRECT_URI = _config.get("oauth_redirect_uri", "http://localhost:1455/au
 UPLOAD_API_URL = _config.get("upload_api_url", "")
 UPLOAD_API_TOKEN = _config.get("upload_api_token", "")
 
-# 输出文件
-ACCOUNTS_FILE = _config.get("accounts_file", "accounts.txt")
-CSV_FILE = _config.get("csv_file", "registered_accounts.csv")
-AK_FILE = _config.get("ak_file", "ak.txt")
-RK_FILE = _config.get("rk_file", "rk.txt")
+# 输出文件（支持环境变量覆盖，方便在后台或脚本中重定向输出路径）
+ACCOUNTS_FILE = os.environ.get("ACCOUNTS_FILE", _config.get("accounts_file", "accounts.txt"))
+CSV_FILE = os.environ.get("CSV_FILE", _config.get("csv_file", "registered_accounts.csv"))
+AK_FILE = os.environ.get("AK_FILE", _config.get("ak_file", "ak.txt"))
+RK_FILE = os.environ.get("RK_FILE", _config.get("rk_file", "rk.txt"))
+# Token JSON 输出目录（当前目录下）
+TOKEN_OUTPUT_DIR = os.environ.get("TOKEN_OUTPUT_DIR", _config.get("token_output_dir", "")).strip()
 
 # 并发文件写入锁（多线程共享文件时防止数据竞争）
 _file_lock = threading.Lock()
+
+
+# =================== 错误输出 + 启动校验 ===================
+
+def _eprint(*args, **kwargs):
+    """将错误/警告信息输出到 stderr，确保即使 stdout 被重定向也能在终端看到。"""
+    print(*args, file=sys.stderr, **kwargs)
+
+
+def _validate_startup_config():
+    """
+    启动时校验必要的配置项。
+    发现致命问题时将错误信息输出到 stderr 并以状态码 1 退出。
+    """
+    errors = []
+
+    # MoeMail 或旧 Cloudflare Worker 二选一必须配置
+    moe_key = (MOEMAIL_API_KEY or "").strip()
+    if moe_key and moe_key.upper() == PLACEHOLDER_API_KEY.upper():
+        moe_key = ""  # 占位符视为未配置
+    cf_ok = bool(CF_WORKER_DOMAIN and CF_ADMIN_PASSWORD)
+
+    if not moe_key and not cf_ok:
+        errors.append(
+            "缺少邮箱服务配置，至少满足以下之一：\n"
+            "     ① MoeMail（推荐）: 在 config.json 填写 \"moemail_api_key\"\n"
+            "       或设置环境变量: export MOEMAIL_API_KEY=your_key\n"
+            "     ② Cloudflare Worker: 填写 cf_worker_domain + cf_admin_password"
+        )
+
+    if errors:
+        _eprint("\n" + "=" * 62)
+        _eprint("  ❌ 启动失败 — 配置校验未通过，请修复后重新运行")
+        _eprint("=" * 62)
+        for i, err in enumerate(errors, 1):
+            _eprint(f"\n  [{i}] {err}")
+        _eprint("\n" + "=" * 62 + "\n")
+        sys.exit(1)
+
+
+_validate_startup_config()
 
 # OpenAI 认证域名
 OPENAI_AUTH_BASE = "https://auth.openai.com"
@@ -2313,7 +2371,12 @@ def save_token_json(email, access_token, refresh_token=None, id_token=None):
             "refresh_token": refresh_token or "",
         }
 
-        filename = f"{email}.json"
+        # 输出到 TOKEN_OUTPUT_DIR（如已设置）否则写入当前目录
+        if TOKEN_OUTPUT_DIR:
+            os.makedirs(TOKEN_OUTPUT_DIR, exist_ok=True)
+            filename = os.path.join(TOKEN_OUTPUT_DIR, f"{email}.json")
+        else:
+            filename = f"{email}.json"
         with open(filename, "w", encoding="utf-8") as f:
             json.dump(token_data, f, ensure_ascii=False)
         print(f"  ✅ Token JSON 已保存到 {filename}")
