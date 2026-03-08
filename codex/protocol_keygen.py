@@ -2645,7 +2645,7 @@ def _test_moemail(api_url: str, api_key: str, domain: str, proxy: str = "") -> t
         test_name = "testconn" + secrets.token_hex(4)
         url = api_url.rstrip("/") + "/api/emails/generate"
         headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
-        payload = {"name": test_name, "expiryTime": 60000, "domain": domain}
+        payload = {"name": test_name, "expiryTime": 3600000, "domain": domain}
         session = create_session()
         if proxy:
             session.proxies = {"http": proxy, "https": proxy}

@@ -18,12 +18,17 @@ class FakeSession:
     def __init__(self, get_responses=None, post_response=None):
         self.get_responses = list(get_responses or [])
         self.post_response = post_response
+        self.last_post_kwargs = {}
 
     def get(self, *args, **kwargs):
         return self.get_responses.pop(0)
 
     def post(self, *args, **kwargs):
+        self.last_post_kwargs = kwargs
         return self.post_response
+
+    def delete(self, *args, **kwargs):
+        return FakeResponse(status_code=200)
 
 
 class ProtocolKeygenMailTests(unittest.TestCase):
@@ -66,6 +71,34 @@ class ProtocolKeygenMailTests(unittest.TestCase):
 
         self.assertEqual(email, "demo@moemail.app")
         self.assertEqual(mailbox_token, "email-id-1")
+
+    def test_test_moemail_uses_valid_expiry_time(self):
+        """_test_moemail must send an expiryTime accepted by the MoeMail API."""
+        VALID_EXPIRY_TIMES = {0, 3600000, 86400000, 604800000}
+        captured = {}
+
+        class CapturingSession:
+            def post(self, url, json=None, **kwargs):
+                captured["json"] = json
+                return FakeResponse(
+                    status_code=200,
+                    payload={"email": "t@moemail.app", "id": "eid-1"},
+                )
+
+            def delete(self, *args, **kwargs):
+                return FakeResponse(status_code=200)
+
+        with mock.patch("protocol_keygen.create_session", return_value=CapturingSession()):
+            ok, err = protocol_keygen._test_moemail(
+                "https://mail.example.com", "testkey", "moemail.app"
+            )
+
+        self.assertTrue(ok, err)
+        self.assertIn(
+            captured["json"]["expiryTime"],
+            VALID_EXPIRY_TIMES,
+            f"expiryTime {captured['json']['expiryTime']} is not a valid MoeMail value",
+        )
 
     def test_fetch_emails_normalizes_moemail_message_details(self):
         session = FakeSession(
