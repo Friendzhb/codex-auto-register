@@ -1,10 +1,11 @@
 {
-  "_comment": "ChatGPT(QQ IMAP + Cloudflare Route)",
+  "_comment": "ChatGPT 批量注册工具 (MoeMail 临时邮箱版)",
   "total_accounts": 3,
 
-  "qq_email": "你的qq 邮箱",
-  "qq_imap_password": "你的QQ邮箱授权码",
-  "forward_domain": "你的域名",
+  "moemail_api_url": "https://mail.zhouhongbin.top",
+  "moemail_api_key": "YOUR_API_KEY",
+  "moemail_domain": "moemail.app",
+  "moemail_expiry_time": 3600000,
 
   "proxy": "",
 
@@ -20,3 +21,4 @@
   "upload_api_url": "",
   "upload_api_token": ""
 }
+

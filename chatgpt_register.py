@@ -1,7 +1,7 @@
 """
-ChatGPT 批量自动注册工具 (并发版) - QQ邮箱 IMAP 版
+ChatGPT 批量自动注册工具 (并发版) - MoeMail 临时邮箱版
 依赖: pip install curl_cffi
-功能: 使用 Cloudflare 域名路由 + QQ邮箱 IMAP 自动接收验证码，并发自动注册 ChatGPT 账号
+功能: 使用 mail.zhouhongbin.top 临时邮箱 API 自动接收验证码，并发自动注册 ChatGPT 账号
 """
 
 import os
@@ -15,9 +15,6 @@ import sys
 import threading
 import traceback
 import secrets
-import imaplib
-import email
-from email.header import decode_header
 import hashlib
 import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,9 +27,10 @@ def _load_config():
     """从 config.json 加载配置，环境变量优先级更高"""
     config = {
         "total_accounts": 3,
-        "qq_email": "12345678@qq.com",
-        "qq_imap_password": "",
-        "forward_domain": "@cumquatyt.online",
+        "moemail_api_url": "https://mail.zhouhongbin.top",
+        "moemail_api_key": "",
+        "moemail_domain": "moemail.app",
+        "moemail_expiry_time": 3600000,
         "proxy": "",
         "output_file": "registered_accounts.txt",
         "enable_oauth": True,
@@ -57,9 +55,14 @@ def _load_config():
             print(f"⚠️ 加载 config.json 失败: {e}")
 
     # 环境变量优先级更高
-    config["qq_email"] = os.environ.get("QQ_EMAIL", config["qq_email"])
-    config["qq_imap_password"] = os.environ.get("QQ_IMAP_PASSWORD", config["qq_imap_password"])
-    config["forward_domain"] = os.environ.get("FORWARD_DOMAIN", config["forward_domain"])
+    config["moemail_api_url"] = os.environ.get("MOEMAIL_API_URL", config["moemail_api_url"])
+    config["moemail_api_key"] = os.environ.get("MOEMAIL_API_KEY", config["moemail_api_key"])
+    config["moemail_domain"] = os.environ.get("MOEMAIL_DOMAIN", config["moemail_domain"])
+    try:
+        config["moemail_expiry_time"] = int(os.environ.get("MOEMAIL_EXPIRY_TIME", config["moemail_expiry_time"]))
+    except (ValueError, TypeError):
+        print("⚠️ MOEMAIL_EXPIRY_TIME 格式无效，使用默认值 3600000")
+        config["moemail_expiry_time"] = 3600000
     config["proxy"] = os.environ.get("PROXY", config["proxy"])
     config["total_accounts"] = int(os.environ.get("TOTAL_ACCOUNTS", config["total_accounts"]))
     config["enable_oauth"] = os.environ.get("ENABLE_OAUTH", config["enable_oauth"])
@@ -85,9 +88,10 @@ def _as_bool(value):
 
 
 _CONFIG = _load_config()
-QQ_EMAIL = _CONFIG["qq_email"]
-QQ_IMAP_PASSWORD = _CONFIG["qq_imap_password"]
-FORWARD_DOMAIN = _CONFIG["forward_domain"]
+MOEMAIL_API_URL = _CONFIG["moemail_api_url"].rstrip("/")
+MOEMAIL_API_KEY = _CONFIG["moemail_api_key"]
+MOEMAIL_DOMAIN = _CONFIG["moemail_domain"]
+MOEMAIL_EXPIRY_TIME = _CONFIG["moemail_expiry_time"]
 DEFAULT_TOTAL_ACCOUNTS = _CONFIG["total_accounts"]
 DEFAULT_PROXY = _CONFIG["proxy"]
 DEFAULT_OUTPUT_FILE = _CONFIG["output_file"]
@@ -102,10 +106,10 @@ TOKEN_JSON_DIR = _CONFIG["token_json_dir"]
 UPLOAD_API_URL = _CONFIG["upload_api_url"]
 UPLOAD_API_TOKEN = _CONFIG["upload_api_token"]
 
-if not QQ_IMAP_PASSWORD:
-    print("⚠️ 警告: 未设置 QQ_IMAP_PASSWORD，请在 config.json 中设置或设置环境变量")
-    print("   文件: config.json -> qq_imap_password")
-    print("   环境变量: export QQ_IMAP_PASSWORD='your_imap_password_here'")
+if not MOEMAIL_API_KEY:
+    print("⚠️ 警告: 未设置 MOEMAIL_API_KEY，请在 config.json 中设置或设置环境变量")
+    print("   文件: config.json -> moemail_api_key")
+    print("   环境变量: export MOEMAIL_API_KEY='your_api_key_here'")
 
 # 全局线程锁
 _print_lock = threading.Lock()
@@ -585,50 +589,48 @@ class ChatGPTRegister:
         with _print_lock:
             print(f"{prefix}{msg}")
 
-    # ==================== QQ IMAP 临时邮箱 ====================
-
-
+    # ==================== MoeMail 临时邮箱 ====================
 
     def create_temp_email(self):
-        """生成随机子邮箱账户"""
-        if not FORWARD_DOMAIN:
-            raise Exception("FORWARD_DOMAIN 未设置，无法生成别名邮箱")
+        """通过 mail.zhouhongbin.top API 生成临时邮箱"""
+        if not MOEMAIL_API_KEY:
+            raise Exception("MOEMAIL_API_KEY 未设置，无法生成临时邮箱")
 
-        # 生成随机邮箱前缀 8-13 位
         chars = string.ascii_lowercase + string.digits
         length = random.randint(8, 13)
-        email_local = "".join(random.choice(chars) for _ in range(length))
-        email = f"{email_local}{FORWARD_DOMAIN}"
+        email_name = "".join(random.choice(chars) for _ in range(length))
+
+        url = f"{MOEMAIL_API_URL}/api/emails/generate"
+        headers = {
+            "X-API-Key": MOEMAIL_API_KEY,
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "name": email_name,
+            "expiryTime": MOEMAIL_EXPIRY_TIME,
+            "domain": MOEMAIL_DOMAIN,
+        }
+
+        resp = curl_requests.post(url, json=payload, headers=headers,
+                                  proxies={"http": self.proxy, "https": self.proxy} if self.proxy else None,
+                                  timeout=30)
+        if resp.status_code != 200:
+            raise Exception(f"生成临时邮箱失败 ({resp.status_code}): {resp.text[:500]}")
+
+        data = resp.json()
+        # API 返回格式: {"email": "xxx@domain", "id": "xxx", ...}
+        email_address = data.get("email") or data.get("address")
+        email_id = data.get("id") or data.get("emailId")
+        if not email_address or not email_id:
+            raise Exception(f"生成临时邮箱响应格式异常: {data}")
+
+        self._moemail_id = email_id
         password = _generate_password()
+        return email_address, password, email_id
 
-        # 此处不涉及外网请求，直接返回 email 和 password
-        # 返回第三个参数为空，兼容原有代码签名（原本这里传的是 mail_token）
-        return email, password, None
-
-    def _get_email_content(self, msg):
-        content = ""
-        if msg.is_multipart():
-            for part in msg.walk():
-                content_type = part.get_content_type()
-                if content_type in ["text/plain", "text/html"]:
-                    try:
-                        payload = part.get_payload(decode=True)
-                        charset = part.get_content_charset() or 'utf-8'
-                        content += payload.decode(charset, errors='ignore')
-                    except Exception:
-                        pass
-        else:
-            try:
-                payload = msg.get_payload(decode=True)
-                charset = msg.get_content_charset() or 'utf-8'
-                content = payload.decode(charset, errors='ignore')
-            except Exception:
-                pass
-        return content
-
-    def _extract_verification_code(self, email_content: str):
+    def _extract_verification_code(self, text: str):
         """从邮件内容提取 6 位验证码"""
-        if not email_content:
+        if not text:
             return None
 
         patterns = [
@@ -641,58 +643,55 @@ class ChatGPTRegister:
         ]
 
         for pattern in patterns:
-            matches = re.findall(pattern, email_content, re.IGNORECASE)
+            matches = re.findall(pattern, text, re.IGNORECASE)
             for code in matches:
                 if code == "177010":  # 已知误判
                     continue
                 return code
         return None
 
-    def wait_for_verification_email(self, target_forward_email: str, timeout: int = 120):
-        """连接 QQ 邮箱 IMAP 并等待发送给 target_forward_email 的 OpenAI 验证码"""
-        self._print(f"[OTP] 等待 QQ 邮箱接收验证码 (最多 {timeout}s)...")
+    def wait_for_verification_email(self, email_or_id: str, timeout: int = 120):
+        """轮询 MoeMail API 等待 OpenAI 验证码邮件"""
+        # 优先使用实例上存储的 email ID
+        email_id = getattr(self, "_moemail_id", None) or email_or_id
+        self._print(f"[OTP] 轮询 MoeMail 邮箱等待验证码 (最多 {timeout}s, emailId={email_id})...")
+
+        headers = {"X-API-Key": MOEMAIL_API_KEY}
+        proxy_map = {"http": self.proxy, "https": self.proxy} if self.proxy else None
         start_time = time.time()
-        
+        seen_message_ids = set()
+
         while time.time() - start_time < timeout:
             try:
-                # 登录 IMAP
-                mail = imaplib.IMAP4_SSL("imap.qq.com")
-                mail.login(QQ_EMAIL, QQ_IMAP_PASSWORD)
-                mail.select("inbox")
-
-                # 搜索所有未读邮件
-                status, messages = mail.search(None, "UNSEEN")
-                
-                if status == "OK" and messages[0]:
-                    for num in messages[0].split()[::-1]: # 从最新邮件开始看
-                        status, data = mail.fetch(num, "(RFC822)")
-                        if status == "OK" and data and data[0]:
-                            raw_email = data[0][1]
-                            msg = email.message_from_bytes(raw_email)
-                            
-                            # 获取收件人 (To) 或 Delivered-To 看看是不是转发的那个邮箱
-                            delivered_to = msg.get("Delivered-To", "") or msg.get("To", "")
-                            
-                            if target_forward_email.lower() in delivered_to.lower():
-                                # 解析邮件内容
-                                content = self._get_email_content(msg)
-                                code = self._extract_verification_code(content)
-                                
-                                if code:
-                                    # 读取成功后，将该邮件标记为已读
-                                    mail.store(num, '+FLAGS', '\\Seen')
-                                    mail.logout()
-                                    self._print(f"[OTP] 验证码: {code}")
-                                    return code
-                
-                mail.logout()
+                list_url = f"{MOEMAIL_API_URL}/api/emails/{email_id}"
+                resp = curl_requests.get(list_url, headers=headers, proxies=proxy_map, timeout=15)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # API 返回格式: {"messages": [...], "nextCursor": "..."}
+                    messages = data.get("messages") or []
+                    for msg in messages:
+                        msg_id = msg.get("id") or msg.get("messageId")
+                        if not msg_id or msg_id in seen_message_ids:
+                            continue
+                        seen_message_ids.add(msg_id)
+                        # 获取单封邮件内容
+                        msg_url = f"{MOEMAIL_API_URL}/api/emails/{email_id}/{msg_id}"
+                        msg_resp = curl_requests.get(msg_url, headers=headers, proxies=proxy_map, timeout=15)
+                        if msg_resp.status_code == 200:
+                            msg_data = msg_resp.json()
+                            # API 返回格式: {"html": "...", "text": "...", "subject": "...", ...}
+                            content = msg_data.get("html") or msg_data.get("text") or ""
+                            code = self._extract_verification_code(content)
+                            if code:
+                                self._print(f"[OTP] 验证码: {code}")
+                                return code
             except Exception as e:
-                self._print(f"[OTP] IMAP 检查失败: {e}")
-                
+                self._print(f"[OTP] 轮询失败: {e}")
+
             elapsed = int(time.time() - start_time)
             self._print(f"[OTP] 等待中... ({elapsed}s/{timeout}s)")
             time.sleep(5)
-            
+
         self._print(f"[OTP] 超时 ({timeout}s)")
         return None
 
@@ -856,7 +855,7 @@ class ChatGPTRegister:
             need_otp = True
 
         if need_otp:
-            # 使用 IMAP 等待验证码
+            # 使用 MoeMail API 等待验证码
             otp_code = self.wait_for_verification_email(email)
             if not otp_code:
                 raise Exception("未能获取验证码")
@@ -867,7 +866,7 @@ class ChatGPTRegister:
                 self._print("验证码失败，重试...")
                 self.send_otp()
                 _random_delay(1.0, 2.0)
-                otp_code = self.wait_for_verification_email(mail_token, timeout=60)
+                otp_code = self.wait_for_verification_email(email, timeout=60)
                 if not otp_code:
                     raise Exception("重试后仍未获取验证码")
                 _random_delay(0.3, 0.8)
@@ -1364,12 +1363,12 @@ class ChatGPTRegister:
         if need_oauth_otp:
             self._print("[OAuth] 4/7 检测到邮箱 OTP 验证")
 
-            # 在 QQ IMAP 流程中，mail_token 即为注册使用的临时邮箱地址
+            # mail_token 在 MoeMail 流程中为 emailId，用于轮询 API；此处使用 email 作为兜底
             target_email = mail_token or email
 
             headers_otp = _oauth_json_headers(f"{OAUTH_ISSUER}/email-verification")
             
-            # 使用 IMAP 轮询等待验证邮件
+            # 使用 MoeMail API 轮询等待验证邮件
             otp_code = self.wait_for_verification_email(target_email, timeout=120)
             
             if not otp_code:
@@ -1483,14 +1482,14 @@ class ChatGPTRegister:
 # ==================== 并发批量注册 ====================
 
 def _register_one(idx, total, proxy, output_file):
-    """单个注册任务 (在线程中运行) - 使用 QQ IMAP 临时邮箱"""
+    """单个注册任务 (在线程中运行) - 使用 MoeMail 临时邮箱"""
     reg = None
     try:
         reg = ChatGPTRegister(proxy=proxy, tag=f"{idx}")
 
         # 1. 创建临时邮箱
-        reg._print("[IMAP+Cloudflare] 创建本地随机临时邮箱...")
-        email, email_pwd, _ = reg.create_temp_email()
+        reg._print("[MoeMail] 创建临时邮箱...")
+        email, email_pwd, email_id = reg.create_temp_email()
         tag = email.split("@")[0]
         reg.tag = tag  # 更新 tag
 
@@ -1502,7 +1501,7 @@ def _register_one(idx, total, proxy, output_file):
             print(f"\n{'='*60}")
             print(f"  [{idx}/{total}] 注册: {email}")
             print(f"  ChatGPT密码: {chatgpt_password}")
-            print(f"  邮箱密码: {email_pwd} (注: IMAP密码在配置中)")
+            print(f"  临时邮箱ID: {email_id}")
             print(f"  姓名: {name} | 生日: {birthdate}")
             print(f"{'='*60}")
 
@@ -1543,11 +1542,11 @@ def _register_one(idx, total, proxy, output_file):
 
 def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
               max_workers=3, proxy=None):
-    """并发批量注册 - QQ IMAP + Cloudflare 路由版"""
+    """并发批量注册 - MoeMail 临时邮箱版"""
 
     actual_workers = min(max_workers, total_accounts)
     print(f"\n{'#'*60}")
-    print(f"  ChatGPT 批量自动注册 (QQ IMAP + Cloudflare 路由版)")
+    print(f"  ChatGPT 批量自动注册 (MoeMail 临时邮箱版)")
     print(f"  注册数量: {total_accounts} | 并发数: {actual_workers}")
     print(f"  OAuth: {'开启' if ENABLE_OAUTH else '关闭'} | required: {'是' if OAUTH_REQUIRED else '否'}")
     if ENABLE_OAUTH:
@@ -1596,7 +1595,7 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
 
 def main():
     print("=" * 60)
-    print("  ChatGPT 批量自动注册工具 (QQ IMAP + Cloudflare 路由版)")
+    print("  ChatGPT 批量自动注册工具 (MoeMail 临时邮箱版)")
     print("=" * 60)
 
     # 交互式代理配置
