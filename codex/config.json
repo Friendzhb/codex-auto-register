@@ -4,7 +4,7 @@
     "headless": false,
     "proxy": "",
     "moemail_api_url": "https://mail.zhouhongbin.top",
-    "moemail_api_key": "YOUR_API_KEY",
+    "moemail_api_key": "",
     "moemail_domain": "moemail.app",
     "moemail_expiry_time": 3600000,
     "oauth_issuer": "https://auth.openai.com",

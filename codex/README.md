@@ -39,7 +39,7 @@
 | upload_api_url | CPA 上传 API |
 | cli_proxy_api_base | CPA CLI 代理 API |
 
-> 默认已切换为与 ChatGPT 脚本一致的 MoeMail 临时邮箱服务；若未配置 `moemail_api_key`，代码会继续回退使用旧的 Cloudflare Worker 配置。
+> 默认已切换为与 ChatGPT 脚本一致的 MoeMail 临时邮箱服务；若未配置 `moemail_api_key`，代码会继续回退使用旧的 Cloudflare Worker 配置，此时需要额外填写 `cf_worker_domain`、`cf_email_domain`、`cf_admin_password`。
 
 ## 使用
 

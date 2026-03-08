@@ -59,6 +59,20 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+PLACEHOLDER_API_KEY = "YOUR_API_KEY"
+
+VERIFICATION_CODE_PATTERNS = [
+    # 顺序按“从最具体到最宽泛”排列，避免通用模式过早命中导致提取到错误上下文中的数字。
+    r'background-color:\s*#F3F3F3[^>]*>[\s\S]*?(\d{6})[\s\S]*?</p>',
+    r'Verification code:?\s*(\d{6})',
+    r'code is\s*(\d{6})',
+    r'代码为[:：]?\s*(\d{6})',
+    r'验证码[:：]?\s*(\d{6})',
+    r'Subject:.*?(\d{6})',
+    r'>\s*(\d{6})\s*<',
+    r'(?<![#&])\b(\d{6})\b',
+]
+
 
 # =================== 配置加载 ===================
 
@@ -483,12 +497,24 @@ class SentinelTokenGenerator:
 
 def use_moemail():
     """是否启用 MoeMail 临时邮箱服务"""
-    return bool(MOEMAIL_API_KEY and MOEMAIL_API_KEY.strip() and MOEMAIL_API_KEY.strip().upper() != "YOUR_API_KEY")
+    api_key = (MOEMAIL_API_KEY or "").strip()
+    return bool(api_key and api_key.upper() != PLACEHOLDER_API_KEY)
 
 
 def get_mailbox_label():
     """当前使用的邮箱服务名称"""
     return "MoeMail" if use_moemail() else "Cloudflare Worker"
+
+
+def resolve_mailbox_token(mailbox_token=None, cf_token=None):
+    """统一处理新旧邮箱凭据参数，优先使用 mailbox_token。"""
+    if mailbox_token and cf_token and mailbox_token != cf_token:
+        print("  ⚠️ 同时传入 mailbox_token 和 cf_token，优先使用 mailbox_token")
+    if mailbox_token is not None:
+        return mailbox_token
+    if cf_token:
+        print("  ⚠️ cf_token 参数已弃用，请改用 mailbox_token")
+    return cf_token
 
 def create_temp_email(session):
     """创建临时邮箱，优先使用 MoeMail，未配置时回退到 Cloudflare Worker"""
@@ -593,7 +619,8 @@ def fetch_emails(session, email, mailbox_token):
                     "source": source,
                 })
             return normalized
-        except Exception:
+        except Exception as e:
+            print(f"  ⚠️ MoeMail 拉取邮件失败: {e}")
             return []
 
     try:
@@ -614,17 +641,7 @@ def extract_verification_code(content):
     """从邮件内容提取6位验证码"""
     if not content:
         return None
-    patterns = [
-        r'background-color:\s*#F3F3F3[^>]*>[\s\S]*?(\d{6})[\s\S]*?</p>',
-        r'Verification code:?\s*(\d{6})',
-        r'code is\s*(\d{6})',
-        r'代码为[:：]?\s*(\d{6})',
-        r'验证码[:：]?\s*(\d{6})',
-        r'Subject:.*?(\d{6})',
-        r'>\s*(\d{6})\s*<',
-        r'(?<![#&])\b(\d{6})\b',
-    ]
-    for pat in patterns:
+    for pat in VERIFICATION_CODE_PATTERNS:
         for code in re.findall(pat, content, re.IGNORECASE):
             if code != "177010":
                 return code
@@ -1158,12 +1175,12 @@ def perform_codex_oauth_login_http(email, password, registrar_session=None, mail
         password: 登录密码
         registrar_session: 注册时的 session（可选，本模式未使用）
         mailbox_token: 邮箱服务标识（MoeMail email_id 或 Cloudflare JWT，用于接收 OTP）
+        cf_token: 兼容旧调用方式的已弃用参数，仅在 mailbox_token 未传入时回退使用
     返回:
         dict: tokens 字典（含 access_token/refresh_token/id_token），失败返回 None
     """
     print("\n🔐 执行 Codex OAuth 登录（纯 HTTP 模式）...")
-    if mailbox_token is None:
-        mailbox_token = cf_token
+    mailbox_token = resolve_mailbox_token(mailbox_token=mailbox_token, cf_token=cf_token)
 
     session = create_session()
     device_id = generate_device_id()

@@ -41,6 +41,16 @@ class ProtocolKeygenMailTests(unittest.TestCase):
             "654321",
         )
         self.assertIsNone(protocol_keygen.extract_verification_code("Subject: 177010"))
+        self.assertIsNone(
+            protocol_keygen.extract_verification_code("<p>验证码：177010</p>")
+        )
+        self.assertIsNone(
+            protocol_keygen.extract_verification_code("https://example.com?a=177010&b=1")
+        )
+        self.assertEqual(
+            protocol_keygen.extract_verification_code("Use code 555444 to continue"),
+            "555444",
+        )
 
     def test_create_temp_email_uses_moemail_response_shape(self):
         session = FakeSession(
