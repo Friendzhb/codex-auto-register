@@ -9,6 +9,10 @@
 
   "proxy": "",
 
+  "flaresolverr_url": "http://localhost:8191",
+  "flaresolverr_refresh_interval": 600,
+  "flaresolverr_timeout": 60,
+
   "output_file": "registered_accounts.txt",
   "enable_oauth": true,
   "oauth_required": true,

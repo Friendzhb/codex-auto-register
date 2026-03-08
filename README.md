@@ -1,14 +1,14 @@
 # ChatGPT 批量自动注册工具
 
-> 使用 Cloudflare 域名 Catch-All 路由 + QQ邮箱 IMAP，并发自动注册 ChatGPT 账号与提取授权凭证
+> 使用 MoeMail 临时邮箱，并发自动注册 ChatGPT 账号与提取授权凭证
 
 ## 功能
 
-- 📨 自动本地生成别名邮箱并通过 Cloudflare 路由至您的主信箱
-- 📥 自动登陆 QQ 邮箱 IMAP 获取 OpenAI OTP 验证码
+- 📨 自动生成 MoeMail 临时邮箱并接收 OpenAI OTP 验证码
 - ⚡ 高并发支持，雪球滚出海量独立账号
 - 🔄 自动处理 OAuth 登录协议及环境检测
 - ☁️ 支持代理配置防止 IP 风控
+- 🛡️ 集成 FlareSolverr 自动绕过 Cloudflare 人机验证（CF Clearance + 浏览器指纹 + User-Agent）
 - 📤 提取出极其符合业务标准 `auth.json` 结构的凭证，可直通下游面板
 
 ## 环境
@@ -22,25 +22,66 @@ pip install curl_cffi
 ```json
 {
   "total_accounts": 5,
-  "qq_email": "你的qqy邮箱",
-  "qq_imap_password": "你的QQ邮箱16位IMAP授权码",
-  "forward_domain": "你的域名",
-  "proxy": "http://127.0.0.1:7890",
+  "moemail_api_url": "https://mail.zhouhongbin.top",
+  "moemail_api_key": "YOUR_API_KEY",
+  "moemail_domain": "moemail.app",
+  "moemail_expiry_time": 3600000,
+  "proxy": "",
+  "flaresolverr_url": "http://localhost:8191",
+  "flaresolverr_refresh_interval": 600,
+  "flaresolverr_timeout": 60,
   "output_file": "registered_accounts.txt",
   "enable_oauth": true,
   "oauth_redirect_uri": "http://localhost:1455/auth/callback"
 }
 ```
 
-| 配置项           | 说明                                              |
-| ---------------- | ------------------------------------------------- |
-| total_accounts   | 注册账号数量                                      |
-| qq_email         | 接收转发验证码信件的QQ邮箱地址                    |
-| qq_imap_password | 该QQ邮箱开启的 16位 IMAP 专用授权码               |
-| forward_domain   | 在Cloudflare绑定的域名路由（如 `@youdomain.com`） |
-| proxy            | 代理地址 (可选，防止主IP被墙。推荐使用)           |
-| output_file      | 纯文本格式输出的文件名                            |
-| enable_oauth     | 开启提取下游面板用的全量 Auth token（必需）       |
+| 配置项                          | 说明                                            |
+| ------------------------------- | ----------------------------------------------- |
+| total_accounts                  | 注册账号数量                                    |
+| moemail_api_url                 | MoeMail API 地址                                |
+| moemail_api_key                 | MoeMail API Key                                 |
+| moemail_domain                  | MoeMail 邮箱域名                                |
+| proxy                           | 代理地址 (可选，防止主IP被墙。推荐使用)         |
+| flaresolverr_url                | FlareSolverr 服务地址（留空则禁用）             |
+| flaresolverr_refresh_interval   | CF Clearance 刷新间隔（秒），默认 600           |
+| flaresolverr_timeout            | Cloudflare 挑战超时（秒），默认 60              |
+| output_file                     | 纯文本格式输出的文件名                          |
+| enable_oauth                    | 开启提取下游面板用的全量 Auth token（必需）     |
+
+## FlareSolverr 配置
+
+本工具支持通过本地 [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) 服务自动绕过 Cloudflare 人机验证，
+获取 `cf_clearance` cookie、浏览器指纹及 User-Agent，无需手动干预。
+
+### 部署 FlareSolverr（Docker，一键启动）
+
+```bash
+docker run -d \
+  --name flaresolverr \
+  -p 8191:8191 \
+  -e LOG_LEVEL=info \
+  --restart unless-stopped \
+  ghcr.io/flaresolverr/flaresolverr:latest
+```
+
+### 参数说明
+
+| 参数                            | 说明                                              | 默认值                  |
+| ------------------------------- | ------------------------------------------------- | ----------------------- |
+| `flaresolverr_url`              | FlareSolverr 服务地址（留空=禁用）                | `http://localhost:8191` |
+| `flaresolverr_refresh_interval` | CF Clearance 缓存有效期（秒），到期后自动刷新     | `600`                   |
+| `flaresolverr_timeout`          | Cloudflare 挑战最大等待时间（秒）                 | `60`                    |
+
+### 环境变量覆盖
+
+| 环境变量                        | 对应配置项                        |
+| ------------------------------- | --------------------------------- |
+| `FLARESOLVERR_URL`              | `flaresolverr_url`                |
+| `FLARESOLVERR_REFRESH_INTERVAL` | `flaresolverr_refresh_interval`   |
+| `FLARESOLVERR_TIMEOUT`          | `flaresolverr_timeout`            |
+
+> 当 `flaresolverr_url` 留空时，工具退回到 curl_cffi 的内置浏览器指纹模式（仍可正常运行）。
 
 ## CPA 面板集成 (可选)
 
@@ -87,5 +128,5 @@ chatgpt_register/
 ## 注意事项
 
 - **强风控警告**：必须保持有效节点注册以避密封 IP。
-- Cloudflare Catch-All (电子路由) 设置需**真实绑定**到您预设的 QQ 邮箱以产生流转。
-- QQ 邮箱需至 “设置 -> 账户 -> IMAP服务” 进行手签开启并生成随机授权白条。
+- 建议配合 FlareSolverr 使用，自动处理 Cloudflare 挑战，无需手动管理 cf_clearance。
+- FlareSolverr 与 curl_cffi 浏览器指纹可叠加使用，提升成功率。

@@ -32,6 +32,9 @@ def _load_config():
         "moemail_domain": "moemail.app",
         "moemail_expiry_time": 3600000,
         "proxy": "",
+        "flaresolverr_url": "",
+        "flaresolverr_refresh_interval": 600,
+        "flaresolverr_timeout": 60,
         "output_file": "registered_accounts.txt",
         "enable_oauth": True,
         "oauth_required": True,
@@ -75,6 +78,19 @@ def _load_config():
     config["token_json_dir"] = os.environ.get("TOKEN_JSON_DIR", config["token_json_dir"])
     config["upload_api_url"] = os.environ.get("UPLOAD_API_URL", config["upload_api_url"])
     config["upload_api_token"] = os.environ.get("UPLOAD_API_TOKEN", config["upload_api_token"])
+    config["flaresolverr_url"] = os.environ.get("FLARESOLVERR_URL", config["flaresolverr_url"])
+    try:
+        config["flaresolverr_refresh_interval"] = int(
+            os.environ.get("FLARESOLVERR_REFRESH_INTERVAL", config["flaresolverr_refresh_interval"])
+        )
+    except (ValueError, TypeError):
+        config["flaresolverr_refresh_interval"] = 600
+    try:
+        config["flaresolverr_timeout"] = int(
+            os.environ.get("FLARESOLVERR_TIMEOUT", config["flaresolverr_timeout"])
+        )
+    except (ValueError, TypeError):
+        config["flaresolverr_timeout"] = 60
 
     return config
 
@@ -105,6 +121,9 @@ RK_FILE = _CONFIG["rk_file"]
 TOKEN_JSON_DIR = _CONFIG["token_json_dir"]
 UPLOAD_API_URL = _CONFIG["upload_api_url"]
 UPLOAD_API_TOKEN = _CONFIG["upload_api_token"]
+FLARESOLVERR_URL = _CONFIG.get("flaresolverr_url", "").strip()
+FLARESOLVERR_REFRESH_INTERVAL = int(_CONFIG.get("flaresolverr_refresh_interval", 600))
+FLARESOLVERR_TIMEOUT = int(_CONFIG.get("flaresolverr_timeout", 60))
 
 if not MOEMAIL_API_KEY:
     print("⚠️ 警告: 未设置 MOEMAIL_API_KEY，请在 config.json 中设置或设置环境变量")
@@ -149,6 +168,135 @@ def _random_chrome_version():
     full_ver = f"{major}.0.{build}.{patch}"
     ua = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{full_ver} Safari/537.36"
     return profile["impersonate"], major, full_ver, ua, profile["sec_ch_ua"]
+
+
+# =================== FlareSolverr CF 过墙客户端 ===================
+
+class _FlareSolverrClient:
+    """
+    FlareSolverr 客户端 — 通过本地 FlareSolverr 服务获取 Cloudflare CF Clearance。
+
+    FlareSolverr 文档: https://github.com/FlareSolverr/FlareSolverr
+    默认端口: 8191
+
+    功能:
+      - 调用 FlareSolverr /v1 接口获取 cf_clearance cookie 和浏览器 User-Agent
+      - 按域名缓存结果，refresh_interval 秒后自动刷新
+      - challenge_timeout 秒内未解决则视为失败
+    """
+
+    def __init__(self, url: str, refresh_interval: int = 600, challenge_timeout: int = 60):
+        self._url = url.rstrip("/")
+        self._refresh_interval = refresh_interval
+        self._max_timeout_ms = challenge_timeout * 1000  # FlareSolverr 接口使用毫秒
+        self._lock = threading.Lock()
+        # 缓存格式: domain -> {"cookies": [...], "user_agent": str, "ts": float}
+        self._cache: dict = {}
+
+    def get_clearance(self, target_url: str):
+        """
+        获取目标域名的 CF Clearance 数据（cookies + User-Agent）。
+
+        命中缓存且未超过 refresh_interval 时直接返回；
+        否则通过 FlareSolverr 刷新，challenge_timeout 为最大等待秒数。
+
+        返回: (cookies_list, user_agent_str) 或 (None, None) 表示失败
+        """
+        from urllib.parse import urlparse as _urlparse
+        domain = _urlparse(target_url).netloc
+        now = time.time()
+
+        with self._lock:
+            cached = self._cache.get(domain)
+            if cached and now - cached["ts"] < self._refresh_interval:
+                return cached["cookies"], cached["user_agent"]
+
+        print(f"  🔓 [FlareSolverr] 正在获取 {domain} 的 CF Clearance（超时 {self._max_timeout_ms // 1000}s）...")
+        try:
+            import urllib.request as _urlreq
+            payload = json.dumps(
+                {"cmd": "request.get", "url": target_url, "maxTimeout": self._max_timeout_ms}
+            ).encode("utf-8")
+            req = _urlreq.Request(
+                f"{self._url}/v1",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            http_timeout = self._max_timeout_ms / 1000 + 15  # 额外 15s 留给网络延迟和 FlareSolverr 自身开销
+            with _urlreq.urlopen(req, timeout=http_timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if data.get("status") == "ok":
+                solution = data.get("solution", {})
+                cookies = solution.get("cookies", [])
+                ua = solution.get("userAgent", "")
+                with self._lock:
+                    self._cache[domain] = {"cookies": cookies, "user_agent": ua, "ts": time.time()}
+                cf_names = [c["name"] for c in cookies if "cf_" in c.get("name", "")]
+                print(
+                    f"  ✅ [FlareSolverr] CF Clearance 已获取 "
+                    f"(cookies={cf_names}, UA长度={len(ua)})"
+                )
+                return cookies, ua
+            else:
+                print(
+                    f"  ❌ [FlareSolverr] 状态: {data.get('status')} — "
+                    f"{data.get('message', '')[:200]}"
+                )
+        except Exception as e:
+            print(f"  ❌ [FlareSolverr] 调用失败: {e}")
+
+        return None, None
+
+    def apply_to_session(self, session, target_url: str) -> bool:
+        """
+        将 CF Clearance cookie（含 cf_clearance）和 User-Agent 注入到 HTTP 会话中。
+
+        注入后，该会话对目标域名的后续请求将自动带上 CF 验证凭证。
+        User-Agent 将更新为 FlareSolverr 浏览器的 UA，以确保与 cf_clearance 一致。
+        对于 curl_cffi 会话，TLS 指纹仍由 impersonate 参数负责，两者互补。
+
+        返回: True 表示已成功注入，False 表示 FlareSolverr 不可用或未配置
+        """
+        from urllib.parse import urlparse as _urlparse
+        domain = _urlparse(target_url).netloc
+
+        cookies, ua = self.get_clearance(target_url)
+        if not cookies and not ua:
+            return False
+
+        # 注入所有 cookie（重点是 cf_clearance）
+        for c in cookies:
+            name = c.get("name", "")
+            value = c.get("value", "")
+            cookie_domain = c.get("domain", f".{domain}")
+            if name and value:
+                try:
+                    session.cookies.set(name, value, domain=cookie_domain)
+                except Exception:
+                    pass
+
+        # 更新 User-Agent（必须与 FlareSolverr 浏览器一致，否则 CF 可能拒绝）
+        if ua:
+            try:
+                session.headers.update({"User-Agent": ua})
+            except Exception:
+                try:
+                    session.headers["User-Agent"] = ua
+                except Exception:
+                    pass
+
+        return True
+
+
+# FlareSolverr 全局实例（None 表示未启用）
+_flaresolverr = (
+    _FlareSolverrClient(FLARESOLVERR_URL, FLARESOLVERR_REFRESH_INTERVAL, FLARESOLVERR_TIMEOUT)
+    if FLARESOLVERR_URL else None
+)
+if _flaresolverr:
+    print(f"🔓 FlareSolverr 已启用: {FLARESOLVERR_URL} "
+          f"(刷新间隔 {FLARESOLVERR_REFRESH_INTERVAL}s, 挑战超时 {FLARESOLVERR_TIMEOUT}s)")
 
 
 def _random_delay(low=0.3, high=1.0):
@@ -566,6 +714,16 @@ class ChatGPTRegister:
 
         self.session.cookies.set("oai-did", self.device_id, domain="chatgpt.com")
         self._callback_url = None
+
+        # 通过 FlareSolverr 获取 CF Clearance（cf_clearance cookie + User-Agent）
+        # 浏览器指纹（TLS 指纹）由 curl_cffi 的 impersonate 参数负责
+        if _flaresolverr:
+            applied = _flaresolverr.apply_to_session(self.session, self.BASE)
+            if applied:
+                # 同步更新实例 UA，保持与 FlareSolverr 浏览器一致
+                fs_ua = self.session.headers.get("User-Agent", "")
+                if fs_ua:
+                    self.ua = fs_ua
 
     def _log(self, step, method, url, status, body=None):
         prefix = f"[{self.tag}] " if self.tag else ""
