@@ -21,5 +21,8 @@
     "rk_file": "rk.txt",
     "cf_worker_domain": "",
     "cf_email_domain": "",
-    "cf_admin_password": ""
+    "cf_admin_password": "",
+    "flaresolverr_url": "http://localhost:8191",
+    "flaresolverr_refresh_interval": 600,
+    "flaresolverr_timeout": 60
 }

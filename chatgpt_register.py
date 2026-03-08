@@ -27,11 +27,15 @@ def _load_config():
     """从 config.json 加载配置，环境变量优先级更高"""
     config = {
         "total_accounts": 3,
+        "concurrent_workers": 3,
         "moemail_api_url": "https://mail.zhouhongbin.top",
         "moemail_api_key": "",
         "moemail_domain": "moemail.app",
         "moemail_expiry_time": 3600000,
         "proxy": "",
+        "flaresolverr_url": "",
+        "flaresolverr_refresh_interval": 600,
+        "flaresolverr_timeout": 60,
         "output_file": "registered_accounts.txt",
         "enable_oauth": True,
         "oauth_required": True,
@@ -51,8 +55,17 @@ def _load_config():
             with open(config_path, "r", encoding="utf-8") as f:
                 file_config = json.load(f)
                 config.update(file_config)
+        except json.JSONDecodeError as e:
+            print(
+                f"\n❌ config.json 解析失败: {e}\n"
+                f"   文件: {config_path}\n"
+                f"   请用以下命令验证 JSON 格式:\n"
+                f"     python3 -m json.tool config.json\n",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         except Exception as e:
-            print(f"⚠️ 加载 config.json 失败: {e}")
+            print(f"⚠️ 加载 config.json 失败: {e}", file=sys.stderr)
 
     # 环境变量优先级更高
     config["moemail_api_url"] = os.environ.get("MOEMAIL_API_URL", config["moemail_api_url"])
@@ -61,10 +74,17 @@ def _load_config():
     try:
         config["moemail_expiry_time"] = int(os.environ.get("MOEMAIL_EXPIRY_TIME", config["moemail_expiry_time"]))
     except (ValueError, TypeError):
-        print("⚠️ MOEMAIL_EXPIRY_TIME 格式无效，使用默认值 3600000")
+        print("⚠️ MOEMAIL_EXPIRY_TIME 格式无效，使用默认值 3600000", file=sys.stderr)
         config["moemail_expiry_time"] = 3600000
     config["proxy"] = os.environ.get("PROXY", config["proxy"])
-    config["total_accounts"] = int(os.environ.get("TOTAL_ACCOUNTS", config["total_accounts"]))
+    try:
+        config["total_accounts"] = int(os.environ.get("TOTAL_ACCOUNTS", config["total_accounts"]))
+    except (ValueError, TypeError):
+        config["total_accounts"] = 3
+    try:
+        config["concurrent_workers"] = int(os.environ.get("CONCURRENT_WORKERS", config["concurrent_workers"]))
+    except (ValueError, TypeError):
+        config["concurrent_workers"] = 3
     config["enable_oauth"] = os.environ.get("ENABLE_OAUTH", config["enable_oauth"])
     config["oauth_required"] = os.environ.get("OAUTH_REQUIRED", config["oauth_required"])
     config["oauth_issuer"] = os.environ.get("OAUTH_ISSUER", config["oauth_issuer"])
@@ -75,6 +95,19 @@ def _load_config():
     config["token_json_dir"] = os.environ.get("TOKEN_JSON_DIR", config["token_json_dir"])
     config["upload_api_url"] = os.environ.get("UPLOAD_API_URL", config["upload_api_url"])
     config["upload_api_token"] = os.environ.get("UPLOAD_API_TOKEN", config["upload_api_token"])
+    config["flaresolverr_url"] = os.environ.get("FLARESOLVERR_URL", config["flaresolverr_url"])
+    try:
+        config["flaresolverr_refresh_interval"] = int(
+            os.environ.get("FLARESOLVERR_REFRESH_INTERVAL", config["flaresolverr_refresh_interval"])
+        )
+    except (ValueError, TypeError):
+        config["flaresolverr_refresh_interval"] = 600
+    try:
+        config["flaresolverr_timeout"] = int(
+            os.environ.get("FLARESOLVERR_TIMEOUT", config["flaresolverr_timeout"])
+        )
+    except (ValueError, TypeError):
+        config["flaresolverr_timeout"] = 60
 
     return config
 
@@ -105,11 +138,47 @@ RK_FILE = _CONFIG["rk_file"]
 TOKEN_JSON_DIR = _CONFIG["token_json_dir"]
 UPLOAD_API_URL = _CONFIG["upload_api_url"]
 UPLOAD_API_TOKEN = _CONFIG["upload_api_token"]
+FLARESOLVERR_URL = _CONFIG.get("flaresolverr_url", "").strip()
+FLARESOLVERR_REFRESH_INTERVAL = int(_CONFIG.get("flaresolverr_refresh_interval", 600))
+FLARESOLVERR_TIMEOUT = int(_CONFIG.get("flaresolverr_timeout", 60))
+DEFAULT_CONCURRENT_WORKERS = _CONFIG.get("concurrent_workers", 3)
 
-if not MOEMAIL_API_KEY:
-    print("⚠️ 警告: 未设置 MOEMAIL_API_KEY，请在 config.json 中设置或设置环境变量")
-    print("   文件: config.json -> moemail_api_key")
-    print("   环境变量: export MOEMAIL_API_KEY='your_api_key_here'")
+_PLACEHOLDER_API_KEY = "YOUR_API_KEY"
+
+
+def _eprint(*args, **kwargs):
+    """将错误/警告信息输出到 stderr，确保即使 stdout 被重定向也能在终端看到。"""
+    print(*args, file=sys.stderr, **kwargs)
+
+
+def _validate_startup_config():
+    """
+    启动时校验必要的配置项。
+    发现致命问题时将错误信息输出到 stderr 并以状态码 1 退出。
+    """
+    errors = []
+
+    # MoeMail API Key 是必需的
+    key = (MOEMAIL_API_KEY or "").strip()
+    if not key or key.upper() == _PLACEHOLDER_API_KEY.upper():
+        errors.append(
+            "缺少 MOEMAIL_API_KEY\n"
+            "     → 在 config.json 中填写:  \"moemail_api_key\": \"your_key\"\n"
+            "     → 或设置环境变量:          export MOEMAIL_API_KEY=your_key"
+        )
+
+    if errors:
+        _eprint("\n" + "=" * 62)
+        _eprint("  ❌ 启动失败 — 配置校验未通过，请修复后重新运行")
+        _eprint("=" * 62)
+        for i, err in enumerate(errors, 1):
+            _eprint(f"\n  [{i}] {err}")
+        _eprint("\n" + "=" * 62 + "\n")
+        sys.exit(1)
+
+
+# _validate_startup_config() is called inside main() so interactive input
+# can supply missing values before the check runs.
 
 # 全局线程锁
 _print_lock = threading.Lock()
@@ -149,6 +218,144 @@ def _random_chrome_version():
     full_ver = f"{major}.0.{build}.{patch}"
     ua = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{full_ver} Safari/537.36"
     return profile["impersonate"], major, full_ver, ua, profile["sec_ch_ua"]
+
+
+# =================== FlareSolverr CF 过墙客户端 ===================
+
+class _FlareSolverrClient:
+    """
+    FlareSolverr 客户端 — 通过本地 FlareSolverr 服务获取 Cloudflare CF Clearance。
+
+    FlareSolverr 文档: https://github.com/FlareSolverr/FlareSolverr
+    默认端口: 8191
+
+    功能:
+      - 调用 FlareSolverr /v1 接口获取 cf_clearance cookie 和浏览器 User-Agent
+      - 按域名缓存结果，refresh_interval 秒后自动刷新
+      - challenge_timeout 秒内未解决则视为失败
+    """
+
+    def __init__(self, url: str, refresh_interval: int = 600, challenge_timeout: int = 60):
+        self._url = url.rstrip("/")
+        self._refresh_interval = refresh_interval
+        self._max_timeout_ms = challenge_timeout * 1000  # FlareSolverr 接口使用毫秒
+        self._lock = threading.Lock()
+        # 缓存格式: domain -> {"cookies": [...], "user_agent": str, "ts": float}
+        self._cache: dict = {}
+
+    def get_clearance(self, target_url: str):
+        """
+        获取目标域名的 CF Clearance 数据（cookies + User-Agent）。
+
+        命中缓存且未超过 refresh_interval 时直接返回；
+        否则通过 FlareSolverr 刷新，challenge_timeout 为最大等待秒数。
+
+        返回: (cookies_list, user_agent_str) 或 (None, None) 表示失败
+        """
+        from urllib.parse import urlparse as _urlparse
+        domain = _urlparse(target_url).netloc
+        now = time.time()
+
+        with self._lock:
+            cached = self._cache.get(domain)
+            if cached and now - cached["ts"] < self._refresh_interval:
+                return cached["cookies"], cached["user_agent"]
+
+        print(f"  🔓 [FlareSolverr] 正在获取 {domain} 的 CF Clearance（超时 {self._max_timeout_ms // 1000}s）...")
+        try:
+            import urllib.request as _urlreq
+            payload = json.dumps(
+                {"cmd": "request.get", "url": target_url, "maxTimeout": self._max_timeout_ms}
+            ).encode("utf-8")
+            req = _urlreq.Request(
+                f"{self._url}/v1",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            http_timeout = self._max_timeout_ms / 1000 + 15  # 额外 15s 留给网络延迟和 FlareSolverr 自身开销
+            with _urlreq.urlopen(req, timeout=http_timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if data.get("status") == "ok":
+                solution = data.get("solution", {})
+                cookies = solution.get("cookies", [])
+                ua = solution.get("userAgent", "")
+                with self._lock:
+                    self._cache[domain] = {"cookies": cookies, "user_agent": ua, "ts": time.time()}
+                cf_names = [c["name"] for c in cookies if "cf_" in c.get("name", "")]
+                print(
+                    f"  ✅ [FlareSolverr] CF Clearance 已获取 "
+                    f"(cookies={cf_names}, UA长度={len(ua)})"
+                )
+                return cookies, ua
+            else:
+                print(
+                    f"  ❌ [FlareSolverr] 状态: {data.get('status')} — "
+                    f"{data.get('message', '')[:200]}"
+                )
+        except Exception as e:
+            print(f"  ❌ [FlareSolverr] 调用失败: {e}")
+
+        return None, None
+
+    def apply_to_session(self, session, target_url: str) -> bool:
+        """
+        将 CF Clearance cookie（含 cf_clearance）和 User-Agent 注入到 HTTP 会话中。
+
+        注入后，该会话对目标域名的后续请求将自动带上 CF 验证凭证。
+        User-Agent 将更新为 FlareSolverr 浏览器的 UA，以确保与 cf_clearance 一致。
+        对于 curl_cffi 会话，TLS 指纹仍由 impersonate 参数负责，两者互补。
+
+        返回: True 表示已成功注入，False 表示 FlareSolverr 不可用或未配置
+        """
+        from urllib.parse import urlparse as _urlparse
+        domain = _urlparse(target_url).netloc
+
+        cookies, ua = self.get_clearance(target_url)
+        if not cookies and not ua:
+            return False
+
+        # 注入所有 cookie（重点是 cf_clearance）
+        for c in cookies:
+            name = c.get("name", "")
+            value = c.get("value", "")
+            cookie_domain = c.get("domain", f".{domain}")
+            if name and value:
+                try:
+                    session.cookies.set(name, value, domain=cookie_domain)
+                except Exception:
+                    pass
+
+        # 更新 User-Agent（必须与 FlareSolverr 浏览器一致，否则 CF 可能拒绝）
+        if ua:
+            try:
+                session.headers.update({"User-Agent": ua})
+            except Exception:
+                try:
+                    session.headers["User-Agent"] = ua
+                except Exception:
+                    pass
+
+        return True
+
+
+# FlareSolverr 全局实例（None 表示未启用）
+# 在 main() 中通过 _init_flaresolverr() 正式初始化，
+# 以便让用户在交互式提示后更新 FLARESOLVERR_URL 再初始化。
+_flaresolverr = None
+
+
+def _init_flaresolverr():
+    """初始化（或重新初始化）全局 FlareSolverr 客户端实例。"""
+    global _flaresolverr
+    if FLARESOLVERR_URL:
+        _flaresolverr = _FlareSolverrClient(
+            FLARESOLVERR_URL, FLARESOLVERR_REFRESH_INTERVAL, FLARESOLVERR_TIMEOUT
+        )
+        print(f"🔓 FlareSolverr 已启用: {FLARESOLVERR_URL} "
+              f"(刷新间隔 {FLARESOLVERR_REFRESH_INTERVAL}s, 挑战超时 {FLARESOLVERR_TIMEOUT}s)")
+    else:
+        _flaresolverr = None
 
 
 def _random_delay(low=0.3, high=1.0):
@@ -566,6 +773,16 @@ class ChatGPTRegister:
 
         self.session.cookies.set("oai-did", self.device_id, domain="chatgpt.com")
         self._callback_url = None
+
+        # 通过 FlareSolverr 获取 CF Clearance（cf_clearance cookie + User-Agent）
+        # 浏览器指纹（TLS 指纹）由 curl_cffi 的 impersonate 参数负责
+        if _flaresolverr:
+            applied = _flaresolverr.apply_to_session(self.session, self.BASE)
+            if applied:
+                # 同步更新实例 UA，保持与 FlareSolverr 浏览器一致
+                fs_ua = self.session.headers.get("User-Agent", "")
+                if fs_ua:
+                    self.ua = fs_ua
 
     def _log(self, step, method, url, status, body=None):
         prefix = f"[{self.tag}] " if self.tag else ""
@@ -1593,45 +1810,247 @@ def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
     print(f"{'#'*60}")
 
 
+# =================== 交互式配置向导 ===================
+
+_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+
+def _save_config():
+    """将当前全局配置写回 config.json（仅更新可交互的字段）。"""
+    try:
+        # 读取现有 JSON，避免覆盖用户手动设置的其他字段
+        existing = {}
+        if os.path.exists(_CONFIG_PATH):
+            with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+    except Exception:
+        existing = {}
+
+    existing.update({
+        "moemail_api_url":  MOEMAIL_API_URL,
+        "moemail_api_key":  MOEMAIL_API_KEY,
+        "moemail_domain":   MOEMAIL_DOMAIN,
+        "proxy":            DEFAULT_PROXY,
+        "flaresolverr_url": FLARESOLVERR_URL,
+        "total_accounts":   DEFAULT_TOTAL_ACCOUNTS,
+        "concurrent_workers": DEFAULT_CONCURRENT_WORKERS,
+    })
+    try:
+        with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+        print(f"✅ 配置已保存到 {_CONFIG_PATH}")
+    except Exception as e:
+        _eprint(f"⚠️ 保存配置文件失败: {e}")
+
+
+def _test_moemail(api_url: str, api_key: str, domain: str, proxy: str = "") -> tuple:
+    """
+    快速测试 MoeMail API 连通性：生成一个临时邮箱然后立即删除。
+    返回 (True, "") 表示成功，(False, "错误描述") 表示失败。
+    """
+    try:
+        test_name = "testconn" + secrets.token_hex(4)
+        url = api_url.rstrip("/") + "/api/emails/generate"
+        headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+        payload = {"name": test_name, "expiryTime": 60000, "domain": domain}
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+
+        resp = curl_requests.post(url, json=payload, headers=headers,
+                                  proxies=proxies, timeout=15)
+        if resp.status_code == 401:
+            return False, f"API Key 无效 (401 Unauthorized)"
+        if resp.status_code == 403:
+            return False, f"API Key 权限不足 (403 Forbidden)"
+        if resp.status_code != 200:
+            return False, f"API 响应异常: HTTP {resp.status_code} — {resp.text[:200]}"
+
+        data = resp.json()
+        email_id = data.get("id") or data.get("emailId")
+        email_addr = data.get("email") or data.get("address")
+        if not email_addr:
+            return False, f"API 响应格式异常，未返回邮箱地址: {data}"
+
+        # 尝试删除测试邮箱（忽略失败）
+        if email_id:
+            try:
+                curl_requests.delete(
+                    api_url.rstrip("/") + f"/api/emails/{email_id}",
+                    headers={"X-API-Key": api_key},
+                    proxies=proxies, timeout=10,
+                )
+            except Exception:
+                pass
+
+        return True, ""
+    except Exception as e:
+        return False, f"连接失败: {e}"
+
+
+def _test_flaresolverr(url: str) -> tuple:
+    """
+    测试 FlareSolverr 服务是否可达。
+    返回 (True, "") 或 (False, "错误描述")。
+    """
+    try:
+        resp = curl_requests.get(url.rstrip("/") + "/health", timeout=8)
+        if resp.status_code == 200:
+            return True, ""
+        return False, f"HTTP {resp.status_code}"
+    except Exception as e:
+        return False, f"连接失败: {e}"
+
+
+def _prompt(prompt_text: str, default: str = "", secret: bool = False) -> str:
+    """
+    交互式单行输入。显示当前默认值（敏感字段只显示 *）。
+    直接回车保留默认值。
+    """
+    if default:
+        display = ("*" * min(len(default), 8)) if secret else default
+        full_prompt = f"{prompt_text} [当前: {display}]: "
+    else:
+        full_prompt = f"{prompt_text} [留空跳过]: "
+    val = input(full_prompt).strip()
+    return val if val else default
+
+
+def _interactive_setup():
+    """
+    启动时交互式配置向导：
+    - 依次询问关键参数
+    - 立即验证连通性
+    - 验证通过后保存到 config.json；失败则重新询问
+    """
+    global MOEMAIL_API_URL, MOEMAIL_API_KEY, MOEMAIL_DOMAIN
+    global FLARESOLVERR_URL
+    global DEFAULT_PROXY, DEFAULT_TOTAL_ACCOUNTS, DEFAULT_CONCURRENT_WORKERS
+
+    print("\n" + "─" * 60)
+    print("  配置向导 — 请依次输入以下参数（直接回车保留当前值）")
+    print("─" * 60)
+
+    # ── 1. MoeMail API URL ──────────────────────────────────────
+    while True:
+        url = _prompt("MoeMail API 地址", default=MOEMAIL_API_URL)
+        if not url:
+            print("  ❌ API 地址不能为空，请重新输入")
+            continue
+        MOEMAIL_API_URL = url.rstrip("/")
+        break
+
+    # ── 2. MoeMail API Key ─────────────────────────────────────
+    while True:
+        key = _prompt("MoeMail API Key", default=MOEMAIL_API_KEY, secret=True)
+        if not key or key.upper() == _PLACEHOLDER_API_KEY.upper():
+            print("  ❌ API Key 不能为空，请输入真实的 API Key")
+            continue
+        MOEMAIL_API_KEY = key
+        break
+
+    # ── 3. MoeMail 邮箱域名 ────────────────────────────────────
+    while True:
+        domain = _prompt("MoeMail 邮箱域名", default=MOEMAIL_DOMAIN)
+        if not domain:
+            print("  ❌ 邮箱域名不能为空")
+            continue
+        MOEMAIL_DOMAIN = domain
+        break
+
+    # ── 4. 代理 ────────────────────────────────────────────────
+    DEFAULT_PROXY = _prompt("代理地址（如 http://127.0.0.1:7890，留空不使用）",
+                            default=DEFAULT_PROXY) or ""
+
+    # ── 5. 验证 MoeMail（带重试）──────────────────────────────
+    print("\n🔍 正在验证 MoeMail API 连通性...")
+    while True:
+        ok, err = _test_moemail(MOEMAIL_API_URL, MOEMAIL_API_KEY, MOEMAIL_DOMAIN,
+                                proxy=DEFAULT_PROXY)
+        if ok:
+            print("  ✅ MoeMail API 验证通过")
+            break
+        print(f"  ❌ MoeMail 验证失败: {err}")
+        print("  请重新输入正确的参数（或 Ctrl+C 退出）")
+
+        url = _prompt("MoeMail API 地址", default=MOEMAIL_API_URL)
+        if url:
+            MOEMAIL_API_URL = url.rstrip("/")
+        key = _prompt("MoeMail API Key", default=MOEMAIL_API_KEY, secret=True)
+        if key and key.upper() != _PLACEHOLDER_API_KEY.upper():
+            MOEMAIL_API_KEY = key
+        domain = _prompt("MoeMail 邮箱域名", default=MOEMAIL_DOMAIN)
+        if domain:
+            MOEMAIL_DOMAIN = domain
+
+    # ── 6. FlareSolverr（可选）───────────────────────────────
+    fs_url = _prompt("FlareSolverr 地址（留空不使用）", default=FLARESOLVERR_URL)
+    if fs_url:
+        print(f"🔍 正在验证 FlareSolverr ({fs_url})...")
+        while True:
+            ok, err = _test_flaresolverr(fs_url)
+            if ok:
+                FLARESOLVERR_URL = fs_url
+                print("  ✅ FlareSolverr 验证通过")
+                break
+            print(f"  ❌ FlareSolverr 验证失败: {err}")
+            fs_url = _prompt("FlareSolverr 地址（留空跳过）", default=fs_url)
+            if not fs_url:
+                FLARESOLVERR_URL = ""
+                print("  ℹ️ 已跳过 FlareSolverr")
+                break
+    else:
+        FLARESOLVERR_URL = ""
+
+    # ── 7. 注册数量 / 并发数 ───────────────────────────────────
+    count_raw = _prompt("注册账号数量", default=str(DEFAULT_TOTAL_ACCOUNTS))
+    try:
+        DEFAULT_TOTAL_ACCOUNTS = max(1, int(count_raw))
+    except ValueError:
+        print(f"  ⚠️ 无效数字，保持 {DEFAULT_TOTAL_ACCOUNTS}")
+
+    workers_raw = _prompt("并发数", default=str(DEFAULT_CONCURRENT_WORKERS))
+    try:
+        DEFAULT_CONCURRENT_WORKERS = max(1, int(workers_raw))
+    except ValueError:
+        print(f"  ⚠️ 无效数字，保持 {DEFAULT_CONCURRENT_WORKERS}")
+
+    # ── 8. 保存配置 ────────────────────────────────────────────
+    _save_config()
+    print("─" * 60 + "\n")
+
+
 def main():
     print("=" * 60)
     print("  ChatGPT 批量自动注册工具 (MoeMail 临时邮箱版)")
     print("=" * 60)
 
-    # 交互式代理配置
-    proxy = DEFAULT_PROXY
-    if proxy:
-        print(f"[Info] 检测到默认代理: {proxy}")
-        use_default = input("使用此代理? (Y/n): ").strip().lower()
-        if use_default == "n":
-            proxy = input("输入代理地址 (留空=不使用代理): ").strip() or None
-    else:
-        env_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy") \
-                 or os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")
-        if env_proxy:
-            print(f"[Info] 检测到环境变量代理: {env_proxy}")
-            use_env = input("使用此代理? (Y/n): ").strip().lower()
-            if use_env == "n":
-                proxy = input("输入代理地址 (留空=不使用代理): ").strip() or None
-            else:
-                proxy = env_proxy
+    # ── 非交互模式 ──────────────────────────────────────────────
+    # 当 stdin 不是终端时（nohup / 后台运行 / 管道重定向），跳过所有
+    # input() 调用，直接使用 config.json 或环境变量中的参数。
+    if not sys.stdin.isatty():
+        print("[Info] 非交互模式：直接使用 config.json / 环境变量中的配置")
+        _validate_startup_config()
+        _init_flaresolverr()
+        proxy = DEFAULT_PROXY or None
+        if proxy:
+            print(f"[Info] 使用代理: {proxy}")
         else:
-            proxy = input("输入代理地址 (如 http://127.0.0.1:7890，留空=不使用代理): ").strip() or None
+            print("[Info] 不使用代理")
+        print(f"[Info] 注册数量: {DEFAULT_TOTAL_ACCOUNTS}  并发数: {DEFAULT_CONCURRENT_WORKERS}")
+        run_batch(
+            total_accounts=DEFAULT_TOTAL_ACCOUNTS,
+            output_file=DEFAULT_OUTPUT_FILE,
+            max_workers=DEFAULT_CONCURRENT_WORKERS,
+            proxy=proxy,
+        )
+        return
 
-    if proxy:
-        print(f"[Info] 使用代理: {proxy}")
-    else:
-        print("[Info] 不使用代理")
+    # ── 交互模式 ─────────────────────────────────────────────────
+    # 配置向导：询问所有关键参数，验证后保存到 config.json
+    _interactive_setup()
+    _init_flaresolverr()
 
-    # 输入注册数量
-    count_input = input(f"\n注册账号数量 (默认 {DEFAULT_TOTAL_ACCOUNTS}): ").strip()
-    total_accounts = int(count_input) if count_input.isdigit() and int(count_input) > 0 else DEFAULT_TOTAL_ACCOUNTS
-
-    workers_input = input("并发数 (默认 3): ").strip()
-    max_workers = int(workers_input) if workers_input.isdigit() and int(workers_input) > 0 else 3
-
-    run_batch(total_accounts=total_accounts, output_file=DEFAULT_OUTPUT_FILE,
-              max_workers=max_workers, proxy=proxy)
+    run_batch(total_accounts=DEFAULT_TOTAL_ACCOUNTS, output_file=DEFAULT_OUTPUT_FILE,
+              max_workers=DEFAULT_CONCURRENT_WORKERS, proxy=DEFAULT_PROXY or None)
 
 
 if __name__ == "__main__":
