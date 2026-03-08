@@ -191,7 +191,8 @@ def _validate_startup_config():
         sys.exit(1)
 
 
-_validate_startup_config()
+# _validate_startup_config() is called inside main() so interactive input
+# can supply missing values before the check runs.
 
 # OpenAI 认证域名
 OPENAI_AUTH_BASE = "https://auth.openai.com"
@@ -332,13 +333,22 @@ class _FlareSolverrClient:
 
 
 # FlareSolverr 全局实例（None 表示未启用）
-_flaresolverr = (
-    _FlareSolverrClient(FLARESOLVERR_URL, FLARESOLVERR_REFRESH_INTERVAL, FLARESOLVERR_TIMEOUT)
-    if FLARESOLVERR_URL else None
-)
-if _flaresolverr:
-    print(f"🔓 FlareSolverr 已启用: {FLARESOLVERR_URL} "
-          f"(刷新间隔 {FLARESOLVERR_REFRESH_INTERVAL}s, 挑战超时 {FLARESOLVERR_TIMEOUT}s)")
+# 在 main() 中通过 _init_flaresolverr() 正式初始化，
+# 以便让用户在交互式提示后更新 FLARESOLVERR_URL 再初始化。
+_flaresolverr = None
+
+
+def _init_flaresolverr():
+    """初始化（或重新初始化）全局 FlareSolverr 客户端实例。"""
+    global _flaresolverr
+    if FLARESOLVERR_URL:
+        _flaresolverr = _FlareSolverrClient(
+            FLARESOLVERR_URL, FLARESOLVERR_REFRESH_INTERVAL, FLARESOLVERR_TIMEOUT
+        )
+        print(f"🔓 FlareSolverr 已启用: {FLARESOLVERR_URL} "
+              f"(刷新间隔 {FLARESOLVERR_REFRESH_INTERVAL}s, 挑战超时 {FLARESOLVERR_TIMEOUT}s)")
+    else:
+        _flaresolverr = None
 
 
 # 使用普通 session（全流程纯 HTTP，无需浏览器）
@@ -2594,5 +2604,230 @@ def run_batch():
     print(f"\n🏁 完成: ✅{ok} ❌{fail} | 总耗时 {elapsed:.1f}s | 吞吐 {throughput:.1f}s/个 | 单号(注册 {avg_reg:.1f}s + OAuth {avg_total - avg_reg:.1f}s = {avg_total:.1f}s)")
 
 
-if __name__ == "__main__":
+# =================== 交互式配置向导 ===================
+
+_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+
+def _save_config():
+    """将当前全局配置写回 config.json（仅更新可交互字段）。"""
+    try:
+        existing = {}
+        if os.path.exists(_CONFIG_PATH):
+            with open(_CONFIG_PATH, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+    except Exception:
+        existing = {}
+
+    existing.update({
+        "moemail_api_url":    MOEMAIL_API_URL,
+        "moemail_api_key":    MOEMAIL_API_KEY,
+        "moemail_domain":     MOEMAIL_DOMAIN,
+        "proxy":              PROXY,
+        "flaresolverr_url":   FLARESOLVERR_URL,
+        "total_accounts":     TOTAL_ACCOUNTS,
+        "concurrent_workers": CONCURRENT_WORKERS,
+    })
+    try:
+        with open(_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(existing, f, indent=2, ensure_ascii=False)
+        print(f"✅ 配置已保存到 {_CONFIG_PATH}")
+    except Exception as e:
+        _eprint(f"⚠️ 保存配置文件失败: {e}")
+
+
+def _test_moemail(api_url: str, api_key: str, domain: str, proxy: str = "") -> tuple:
+    """
+    快速测试 MoeMail API 连通性：生成一个临时邮箱然后立即删除。
+    返回 (True, "") 表示成功，(False, "错误描述") 表示失败。
+    """
+    try:
+        test_name = "testconn" + secrets.token_hex(4)
+        url = api_url.rstrip("/") + "/api/emails/generate"
+        headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+        payload = {"name": test_name, "expiryTime": 60000, "domain": domain}
+        session = create_session()
+        if proxy:
+            session.proxies = {"http": proxy, "https": proxy}
+
+        resp = session.post(url, json=payload, headers=headers, timeout=15)
+        if resp.status_code == 401:
+            return False, "API Key 无效 (401 Unauthorized)"
+        if resp.status_code == 403:
+            return False, "API Key 权限不足 (403 Forbidden)"
+        if resp.status_code != 200:
+            return False, f"API 响应异常: HTTP {resp.status_code} — {resp.text[:200]}"
+
+        data = resp.json()
+        email_id = data.get("id") or data.get("emailId")
+        email_addr = data.get("email") or data.get("address")
+        if not email_addr:
+            return False, f"API 响应格式异常，未返回邮箱地址: {data}"
+
+        # 尝试删除测试邮箱（忽略失败）
+        if email_id:
+            try:
+                session.delete(
+                    api_url.rstrip("/") + f"/api/emails/{email_id}",
+                    headers={"X-API-Key": api_key},
+                    timeout=10,
+                )
+            except Exception:
+                pass
+
+        return True, ""
+    except Exception as e:
+        return False, f"连接失败: {e}"
+
+
+def _test_flaresolverr(url: str) -> tuple:
+    """
+    测试 FlareSolverr 服务是否可达。
+    返回 (True, "") 或 (False, "错误描述")。
+    """
+    try:
+        resp = create_session().get(url.rstrip("/") + "/health", timeout=8)
+        if resp.status_code == 200:
+            return True, ""
+        return False, f"HTTP {resp.status_code}"
+    except Exception as e:
+        return False, f"连接失败: {e}"
+
+
+def _prompt(prompt_text: str, default: str = "", secret: bool = False) -> str:
+    """
+    交互式单行输入。显示当前默认值（敏感字段只显示 *）。
+    直接回车保留默认值。
+    """
+    if default:
+        display = ("*" * min(len(default), 8)) if secret else default
+        full_prompt = f"{prompt_text} [当前: {display}]: "
+    else:
+        full_prompt = f"{prompt_text} [留空跳过]: "
+    val = input(full_prompt).strip()
+    return val if val else default
+
+
+def _interactive_setup():
+    """
+    启动时交互式配置向导：
+    - 依次询问关键参数
+    - 立即验证连通性
+    - 验证通过后保存到 config.json；失败则重新询问
+    """
+    global MOEMAIL_API_URL, MOEMAIL_API_KEY, MOEMAIL_DOMAIN
+    global FLARESOLVERR_URL, PROXY, TOTAL_ACCOUNTS, CONCURRENT_WORKERS
+
+    print("\n" + "─" * 60)
+    print("  配置向导 — 请依次输入以下参数（直接回车保留当前值）")
+    print("─" * 60)
+
+    # ── 1. MoeMail API URL ──────────────────────────────────────
+    while True:
+        url = _prompt("MoeMail API 地址", default=MOEMAIL_API_URL)
+        if not url:
+            print("  ❌ API 地址不能为空，请重新输入")
+            continue
+        MOEMAIL_API_URL = url.rstrip("/")
+        break
+
+    # ── 2. MoeMail API Key ─────────────────────────────────────
+    while True:
+        key = _prompt("MoeMail API Key", default=MOEMAIL_API_KEY, secret=True)
+        if not key or key.upper() == PLACEHOLDER_API_KEY.upper():
+            print("  ❌ API Key 不能为空，请输入真实的 API Key")
+            continue
+        MOEMAIL_API_KEY = key
+        break
+
+    # ── 3. MoeMail 邮箱域名 ────────────────────────────────────
+    while True:
+        domain = _prompt("MoeMail 邮箱域名", default=MOEMAIL_DOMAIN)
+        if not domain:
+            print("  ❌ 邮箱域名不能为空")
+            continue
+        MOEMAIL_DOMAIN = domain
+        break
+
+    # ── 4. 代理 ────────────────────────────────────────────────
+    PROXY = _prompt("代理地址（如 http://127.0.0.1:7890，留空不使用）",
+                    default=PROXY) or ""
+
+    # ── 5. 验证 MoeMail（带重试）──────────────────────────────
+    print("\n🔍 正在验证 MoeMail API 连通性...")
+    while True:
+        ok, err = _test_moemail(MOEMAIL_API_URL, MOEMAIL_API_KEY, MOEMAIL_DOMAIN, proxy=PROXY)
+        if ok:
+            print("  ✅ MoeMail API 验证通过")
+            break
+        print(f"  ❌ MoeMail 验证失败: {err}")
+        print("  请重新输入正确的参数（或 Ctrl+C 退出）")
+
+        url = _prompt("MoeMail API 地址", default=MOEMAIL_API_URL)
+        if url:
+            MOEMAIL_API_URL = url.rstrip("/")
+        key = _prompt("MoeMail API Key", default=MOEMAIL_API_KEY, secret=True)
+        if key and key.upper() != PLACEHOLDER_API_KEY.upper():
+            MOEMAIL_API_KEY = key
+        domain = _prompt("MoeMail 邮箱域名", default=MOEMAIL_DOMAIN)
+        if domain:
+            MOEMAIL_DOMAIN = domain
+
+    # ── 6. FlareSolverr（可选）───────────────────────────────
+    fs_url = _prompt("FlareSolverr 地址（留空不使用）", default=FLARESOLVERR_URL)
+    if fs_url:
+        print(f"🔍 正在验证 FlareSolverr ({fs_url})...")
+        while True:
+            ok, err = _test_flaresolverr(fs_url)
+            if ok:
+                FLARESOLVERR_URL = fs_url
+                print("  ✅ FlareSolverr 验证通过")
+                break
+            print(f"  ❌ FlareSolverr 验证失败: {err}")
+            fs_url = _prompt("FlareSolverr 地址（留空跳过）", default=fs_url)
+            if not fs_url:
+                FLARESOLVERR_URL = ""
+                print("  ℹ️ 已跳过 FlareSolverr")
+                break
+    else:
+        FLARESOLVERR_URL = ""
+
+    # ── 7. 注册数量 / 并发数 ───────────────────────────────────
+    count_raw = _prompt("注册账号数量", default=str(TOTAL_ACCOUNTS))
+    try:
+        TOTAL_ACCOUNTS = max(1, int(count_raw))
+    except ValueError:
+        print(f"  ⚠️ 无效数字，保持 {TOTAL_ACCOUNTS}")
+
+    workers_raw = _prompt("并发数", default=str(CONCURRENT_WORKERS))
+    try:
+        CONCURRENT_WORKERS = max(1, int(workers_raw))
+    except ValueError:
+        print(f"  ⚠️ 无效数字，保持 {CONCURRENT_WORKERS}")
+
+    # ── 8. 保存配置 ────────────────────────────────────────────
+    _save_config()
+    print("─" * 60 + "\n")
+
+
+def main():
+    """协议注册机入口（交互 + 非交互两用）。"""
+    print("=" * 60)
+    print("  Codex 协议注册机 v5")
+    print("=" * 60)
+
+    if sys.stdin.isatty():
+        # 交互模式：配置向导 → 验证 → 保存 → 运行
+        _interactive_setup()
+        _init_flaresolverr()
+    else:
+        # 非交互模式（nohup / 管道）：直接用配置文件，严格校验
+        print("[Info] 非交互模式：直接使用 config.json / 环境变量中的配置")
+        _validate_startup_config()
+        _init_flaresolverr()
+
     run_batch()
+
+
+if __name__ == "__main__":
+    main()
