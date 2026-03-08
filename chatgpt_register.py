@@ -20,7 +20,25 @@ import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse, parse_qs, urlencode
 
-from curl_cffi import requests as curl_requests
+try:
+    from curl_cffi import requests as curl_requests
+    from importlib.metadata import version as _pkg_version, PackageNotFoundError as _PkgNotFound
+    try:
+        _installed = tuple(int(x) for x in _pkg_version("curl_cffi").split(".")[:3])
+    except (_PkgNotFound, ValueError):
+        _installed = (0, 0, 0)
+    if _installed < (0, 7, 0):
+        raise ImportError(f"curl_cffi version too old: {_installed}")
+except ImportError:
+    print(
+        "\n❌ 缺少依赖 curl_cffi（或版本过低，需 >=0.7.0）\n"
+        "   国内镜像源（如阿里云）可能不含此包的最新版，请改用官方 PyPI 源安装：\n"
+        "     pip3 install -r requirements.txt -i https://pypi.org/simple/\n"
+        "   若只想单独安装 curl_cffi：\n"
+        "     pip3 install 'curl_cffi>=0.7.0' -i https://pypi.org/simple/\n",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 # ================= 加载配置 =================
 def _load_config():
