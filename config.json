@@ -5,7 +5,7 @@
   "moemail_api_url": "https://mail.zhouhongbin.top",
   "moemail_api_key": "YOUR_API_KEY",
   "moemail_domain": "moemail.app",
-  "moemail_expiry_time": 3600000,
+  "moemail_expiry_time": 600000,
 
   "proxy": "",
 

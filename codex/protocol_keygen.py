@@ -153,6 +153,17 @@ TOKEN_OUTPUT_DIR = os.environ.get("TOKEN_OUTPUT_DIR", _config.get("token_output_
 _file_lock = threading.Lock()
 
 
+# =================== 自定义异常 ===================
+
+class UnsupportedEmailDomainError(Exception):
+    """
+    OpenAI 在 create_account 阶段拒绝了邮箱域名（error.code == "unsupported_email"）。
+
+    此错误属于域名级别的封禁，与单个账号无关。
+    捕获后应立即终止整个批量注册任务，并提示用户更换 moemail_domain 配置。
+    """
+
+
 # =================== 错误输出 + 启动校验 ===================
 
 def _eprint(*args, **kwargs):
@@ -189,6 +200,32 @@ def _validate_startup_config():
             _eprint(f"\n  [{i}] {err}")
         _eprint("\n" + "=" * 62 + "\n")
         sys.exit(1)
+
+    # 检测常见误配置：moemail_domain 与 moemail_api_url 的主机名相同，
+    # 或 API 服务器为 "mail.<domain>" 而 moemail_domain 填成了 "<domain>"。
+    # 两种情况都会导致 OpenAI 在 create_account 阶段返回 unsupported_email 错误。
+    if moe_key:
+        try:
+            from urllib.parse import urlparse as _up
+            api_host = (_up(MOEMAIL_API_URL).hostname or "").lower()
+            domain_lower = MOEMAIL_DOMAIN.lower().lstrip(".")
+            # 触发警告的两种情形：
+            #   1. domain == api_host          （如 domain="mail.example.com"）
+            #   2. api_host == "mail.<domain>" （如 domain="example.com"，api="mail.example.com"）
+            if domain_lower == api_host or api_host == f"mail.{domain_lower}":
+                _eprint("\n" + "⚠️ " * 20)
+                _eprint(
+                    f"  ⚠️  配置警告: moemail_domain='{MOEMAIL_DOMAIN}' 与\n"
+                    f"     moemail_api_url 的主机名 '{api_host}' 相同或高度相关。\n"
+                    f"  ⚠️  这是常见误配置！moemail_domain 应填写邮箱的后缀域名\n"
+                    f"     （如 'moemail.app'），而非 API 服务器地址。\n"
+                    f"  ⚠️  该配置会导致 OpenAI 在注册时返回 unsupported_email 错误\n"
+                    f"     并拒绝所有使用 '{MOEMAIL_DOMAIN}' 域名的邮箱注册。\n"
+                    f"  💡  请在 config.json 中将 moemail_domain 改为正确的邮箱域名。"
+                )
+                _eprint("⚠️ " * 20 + "\n")
+        except Exception:
+            pass
 
 
 # _validate_startup_config() is called inside main() so interactive input
@@ -230,13 +267,19 @@ class _FlareSolverrClient:
       - challenge_timeout 秒内未解决则视为失败
     """
 
+    # 失败后的负缓存保留时间（秒）。在此期间直接跳过 FlareSolverr 调用，
+    # 避免因服务不可用而产生大量 75s 超时阻塞。
+    _NEGATIVE_CACHE_TTL = 120
+
     def __init__(self, url: str, refresh_interval: int = 600, challenge_timeout: int = 60):
         self._url = url.rstrip("/")
         self._refresh_interval = refresh_interval
         self._max_timeout_ms = challenge_timeout * 1000  # FlareSolverr 接口使用毫秒
         self._lock = threading.Lock()
-        # 缓存格式: domain -> {"cookies": [...], "user_agent": str, "ts": float}
+        # 正向缓存: domain -> {"cookies": [...], "user_agent": str, "ts": float}
         self._cache: dict = {}
+        # 负向缓存: domain -> 上次失败时间戳（避免重复超时）
+        self._failure_cache: dict = {}
 
     def get_clearance(self, target_url: str):
         """
@@ -244,6 +287,8 @@ class _FlareSolverrClient:
 
         命中缓存且未超过 refresh_interval 时直接返回；
         否则通过 FlareSolverr 刷新，challenge_timeout 为最大等待秒数。
+        最近调用失败时，在 _NEGATIVE_CACHE_TTL 内直接返回 (None, None)，
+        避免因 FlareSolverr 不可用导致每次注册阻塞 75 秒。
 
         返回: (cookies_list, user_agent_str) 或 (None, None) 表示失败
         """
@@ -252,9 +297,14 @@ class _FlareSolverrClient:
         now = time.time()
 
         with self._lock:
+            # 正向缓存命中
             cached = self._cache.get(domain)
             if cached and now - cached["ts"] < self._refresh_interval:
                 return cached["cookies"], cached["user_agent"]
+            # 负向缓存命中：上次失败不久，直接跳过以免再次阻塞
+            fail_ts = self._failure_cache.get(domain, 0)
+            if now - fail_ts < self._NEGATIVE_CACHE_TTL:
+                return None, None
 
         print(f"  🔓 [FlareSolverr] 正在获取 {domain} 的 CF Clearance（超时 {self._max_timeout_ms // 1000}s）...")
         try:
@@ -291,6 +341,9 @@ class _FlareSolverrClient:
         except Exception as e:
             print(f"  ❌ [FlareSolverr] 调用失败: {e}")
 
+        # 写入负向缓存，避免短时间内重复超时
+        with self._lock:
+            self._failure_cache[domain] = time.time()
         return None, None
 
     def apply_to_session(self, session, target_url: str) -> bool:
@@ -725,6 +778,31 @@ def resolve_mailbox_token(mailbox_token=None, cf_token=None):
     if cf_token:
         print("  ⚠️ cf_token 参数已弃用，请改用 mailbox_token")
     return cf_token
+
+def delete_temp_email(session, mailbox_token):
+    """
+    注册完成后（无论成功或失败）通过 MoeMail API 删除临时邮箱。
+
+    仅在使用 MoeMail 且 mailbox_token（email_id）有效时调用；
+    Cloudflare Worker 模式无对应删除接口，直接跳过。
+    任何错误均被静默吞掉，不影响主流程。
+    """
+    if not use_moemail() or not mailbox_token:
+        return
+    try:
+        res = session.delete(
+            f"{MOEMAIL_API_URL}/api/emails/{mailbox_token}",
+            headers={"X-API-Key": MOEMAIL_API_KEY},
+            verify=False,
+            timeout=10,
+        )
+        if res.status_code in (200, 204):
+            print(f"  🗑️ 临时邮箱已删除 (id={mailbox_token})")
+        else:
+            print(f"  ⚠️ 删除临时邮箱失败: HTTP {res.status_code}")
+    except Exception as e:
+        print(f"  ⚠️ 删除临时邮箱异常: {e}")
+
 
 def create_temp_email(session):
     """创建临时邮箱，优先使用 MoeMail，未配置时回退到 Cloudflare Worker"""
@@ -1215,6 +1293,30 @@ class ProtocolRegistrar:
                 return True
             print(f"  ❌ 重试仍失败: {resp.text[:300]}")
             return False
+        elif resp.status_code == 400:
+            # 检查是否为邮箱域名被 OpenAI 封禁
+            try:
+                err_data = resp.json()
+                err_code = err_data.get("error", {}).get("code", "")
+                if err_code == "unsupported_email":
+                    print(f"  ❌ 失败: {resp.text[:300]}")
+                    print(
+                        f"\n  {'⚠️ ' * 10}\n"
+                        f"  ❌ OpenAI 拒绝了邮箱域名（unsupported_email）\n"
+                        f"  ❌ 当前使用的域名: {MOEMAIL_DOMAIN}\n"
+                        f"  💡 该域名已被 OpenAI 列入不支持列表，无法用于注册。\n"
+                        f"  💡 请在 config.json 中将 moemail_domain 改为其他受支持的域名。\n"
+                        f"  {'⚠️ ' * 10}\n"
+                    )
+                    raise UnsupportedEmailDomainError(
+                        f"邮箱域名 '{MOEMAIL_DOMAIN}' 被 OpenAI 拒绝 (unsupported_email)"
+                    )
+            except UnsupportedEmailDomainError:
+                raise
+            except Exception:
+                pass
+            print(f"  ❌ 失败: {resp.text[:300]}")
+            return False
         else:
             print(f"  ❌ 失败: {resp.text[:300]}")
             if resp.status_code in (301, 302):
@@ -1270,6 +1372,9 @@ class ProtocolRegistrar:
             print("\n🎉 注册成功！")
             return True, email, password
 
+        except UnsupportedEmailDomainError:
+            # 域名级封禁，直接向上传递，让 register_one() 终止整个批次
+            raise
         except Exception as e:
             print(f"\n❌ 注册异常: {e}")
             import traceback
@@ -2467,53 +2572,63 @@ def register_one(worker_id=0, task_index=0, total=1):
     """
     注册单个账号的完整流程（线程安全）
     返回: (email, password, success, reg_time, total_time)
+    抛出 UnsupportedEmailDomainError：邮箱域名被 OpenAI 封禁，批次应立即终止。
     """
     tag = f"[W{worker_id}]" if CONCURRENT_WORKERS > 1 else ""
     t_start = time.time()
-    session = create_session()
+    # 专用于邮箱 API 操作（create / poll / delete）的 session；
+    # ProtocolRegistrar 内部会独立创建自己的 session，两者相互独立。
+    mail_session = create_session()
 
     # 1. 创建临时邮箱
-    email, mailbox_token = create_temp_email(session)
+    email, mailbox_token = create_temp_email(mail_session)
     if not email:
         return None, None, False, 0, 0
 
     password = generate_random_password()
 
-    # 2. 协议注册
-    registrar = ProtocolRegistrar()
-    success, email, password = registrar.register(email, mailbox_token, password)
-    save_account(email, password)
-
-    t_reg = time.time() - t_start  # 注册耗时
-
-    if not success:
-        return email, password, False, t_reg, t_reg
-
-    print(f"  📝 注册耗时: {t_reg:.1f}s")
-
-    # 3. Codex OAuth 登录
-    tokens = None
     try:
-        tokens = perform_codex_oauth_login_http(
-            email, password,
-            registrar_session=registrar.session,
-            mailbox_token=mailbox_token,
-        )
+        # 2. 协议注册（UnsupportedEmailDomainError 直接向上抛出，终止批次）
+        registrar = ProtocolRegistrar()
+        success, email, password = registrar.register(email, mailbox_token, password)
+        save_account(email, password)
 
-        if not tokens:
-            print(f"{tag}  ❌ 纯 HTTP OAuth 失败")
+        t_reg = time.time() - t_start  # 注册耗时
 
-        t_total = time.time() - t_start
-        if tokens:
-            save_tokens(email, tokens)
-            print(f"{tag} ✅ {email} | 注册 {t_reg:.1f}s + OAuth {t_total - t_reg:.1f}s = 总 {t_total:.1f}s")
-        else:
-            print(f"{tag} ⚠️ OAuth 失败（注册已成功）")
-    except Exception as e:
-        t_total = time.time() - t_start
-        print(f"{tag} ⚠️ OAuth 异常: {e}")
+        if not success:
+            return email, password, False, t_reg, t_reg
 
-    return email, password, True, t_reg, t_total
+        print(f"  📝 注册耗时: {t_reg:.1f}s")
+
+        # 3. Codex OAuth 登录
+        tokens = None
+        try:
+            tokens = perform_codex_oauth_login_http(
+                email, password,
+                registrar_session=registrar.session,
+                mailbox_token=mailbox_token,
+            )
+
+            if not tokens:
+                print(f"{tag}  ❌ 纯 HTTP OAuth 失败")
+
+            t_total = time.time() - t_start
+            if tokens:
+                save_tokens(email, tokens)
+                print(f"{tag} ✅ {email} | 注册 {t_reg:.1f}s + OAuth {t_total - t_reg:.1f}s = 总 {t_total:.1f}s")
+            else:
+                print(f"{tag} ⚠️ OAuth 失败（注册已成功）")
+        except Exception as e:
+            t_total = time.time() - t_start
+            print(f"{tag} ⚠️ OAuth 异常: {e}")
+
+        return email, password, True, t_reg, t_total
+
+    finally:
+        # 注册完成后（无论成功/失败）立即删除临时邮箱，释放 MoeMail 资源。
+        # mailbox_token 在 create_temp_email 成功时才不为 None，
+        # delete_temp_email 内部已做 None 检查，可安全调用。
+        delete_temp_email(mail_session, mailbox_token)
 
 
 def run_batch():
@@ -2529,14 +2644,26 @@ def run_batch():
     results_lock = threading.Lock()
     reg_times = []    # 注册耗时列表
     total_times = []  # 总耗时列表
+    # 用于并发模式下的域名封禁标志
+    domain_blocked = threading.Event()
 
     if workers == 1:
         for i in range(TOTAL_ACCOUNTS):
             print(f"\n--- [{i+1}/{TOTAL_ACCOUNTS}] ---")
 
-            email, password, success, t_reg, t_total = register_one(
-                worker_id=0, task_index=i + 1, total=TOTAL_ACCOUNTS
-            )
+            try:
+                email, password, success, t_reg, t_total = register_one(
+                    worker_id=0, task_index=i + 1, total=TOTAL_ACCOUNTS
+                )
+            except UnsupportedEmailDomainError as e:
+                print(
+                    f"\n🚫 批量注册已中止：{e}\n"
+                    f"   请修改 config.json 中的 moemail_domain 后重新运行。"
+                )
+                # 当前账号（第 i+1 个）+ 剩余未尝试的账号均算失败
+                # fail += 1（当前）+ (TOTAL_ACCOUNTS - 1 - i)（剩余）= TOTAL_ACCOUNTS - i
+                fail += TOTAL_ACCOUNTS - i
+                break
 
             if success:
                 ok += 1
@@ -2556,6 +2683,8 @@ def run_batch():
         print(f"🔀 启动 {workers} 个并发 worker...\n")
 
         def _worker_task(task_index, worker_id):
+            if domain_blocked.is_set():
+                return task_index, None, None, False, 0, 0
             if task_index > 1:
                 jitter = random.uniform(1, 3) * worker_id
                 time.sleep(jitter)
@@ -2566,6 +2695,13 @@ def run_batch():
                     total=TOTAL_ACCOUNTS
                 )
                 return task_index, email, password, success, t_reg, t_total
+            except UnsupportedEmailDomainError as e:
+                domain_blocked.set()
+                print(
+                    f"\n🚫 [W{worker_id}] 域名封禁，已停止提交新任务：{e}\n"
+                    f"   请修改 config.json 中的 moemail_domain 后重新运行。"
+                )
+                return task_index, None, None, False, 0, 0
             except Exception as e:
                 print(f"[W{worker_id}] ❌ 异常: {e}")
                 return task_index, None, None, False, 0, 0

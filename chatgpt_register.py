@@ -863,6 +863,25 @@ class ChatGPTRegister:
         password = _generate_password()
         return email_address, password, email_id
 
+    def delete_temp_email(self, email_id: str):
+        """注册完成后通过 MoeMail API 删除临时邮箱，释放资源"""
+        if not email_id or not MOEMAIL_API_KEY:
+            return
+        try:
+            url = f"{MOEMAIL_API_URL}/api/emails/{email_id}"
+            headers = {"X-API-Key": MOEMAIL_API_KEY}
+            resp = curl_requests.delete(
+                url, headers=headers,
+                proxies={"http": self.proxy, "https": self.proxy} if self.proxy else None,
+                timeout=10,
+            )
+            if resp.status_code in (200, 204):
+                self._print(f"[MoeMail] 临时邮箱已删除 (id={email_id})")
+            else:
+                self._print(f"[MoeMail] 删除临时邮箱失败: HTTP {resp.status_code}")
+        except Exception as e:
+            self._print(f"[MoeMail] 删除临时邮箱异常: {e}")
+
     def _extract_verification_code(self, text: str):
         """从邮件内容提取 6 位验证码"""
         if not text:
@@ -1719,6 +1738,9 @@ class ChatGPTRegister:
 def _register_one(idx, total, proxy, output_file):
     """单个注册任务 (在线程中运行) - 使用 MoeMail 临时邮箱"""
     reg = None
+    # email_id 在 create_temp_email 成功后赋值；
+    # 若在此之前发生异常则保持 None，finally 块中的条件检查会正确跳过删除。
+    email_id = None
     try:
         reg = ChatGPTRegister(proxy=proxy, tag=f"{idx}")
 
@@ -1773,6 +1795,11 @@ def _register_one(idx, total, proxy, output_file):
             print(f"\n[FAIL] [{idx}] 注册失败: {error_msg}")
             traceback.print_exc()
         return False, None, error_msg
+
+    finally:
+        # 注册完成后（无论成功/失败）立即删除临时邮箱，释放 MoeMail 资源
+        if reg and email_id:
+            reg.delete_temp_email(email_id)
 
 
 def run_batch(total_accounts: int = 3, output_file="registered_accounts.txt",
