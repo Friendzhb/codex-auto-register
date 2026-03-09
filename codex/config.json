@@ -6,7 +6,7 @@
     "moemail_api_url": "https://mail.zhouhongbin.top",
     "moemail_api_key": "",
     "moemail_domain": "moemail.app",
-    "moemail_expiry_time": 3600000,
+    "moemail_expiry_time": 0,
     "oauth_issuer": "https://auth.openai.com",
     "oauth_client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
     "oauth_redirect_uri": "http://localhost:1455/auth/callback",

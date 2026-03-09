@@ -74,7 +74,7 @@ class ProtocolKeygenMailTests(unittest.TestCase):
 
     def test_test_moemail_uses_valid_expiry_time(self):
         """_test_moemail must send an expiryTime accepted by the MoeMail API."""
-        VALID_EXPIRY_TIMES = {0, 3600000, 86400000, 604800000}
+        VALID_EXPIRY_TIMES = {0, 3600000, 86400000, 259200000}
         captured = {}
 
         class CapturingSession:

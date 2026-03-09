@@ -112,7 +112,7 @@ PROXY = _config.get("proxy", "")
 MOEMAIL_API_URL = _config.get("moemail_api_url", "https://mail.zhouhongbin.top")
 MOEMAIL_API_KEY = _config.get("moemail_api_key", "")
 MOEMAIL_DOMAIN = _config.get("moemail_domain", "moemail.app")
-MOEMAIL_EXPIRY_TIME = _config.get("moemail_expiry_time", 3600000)
+MOEMAIL_EXPIRY_TIME = _config.get("moemail_expiry_time", 0)
 CF_WORKER_DOMAIN = _config.get("cf_worker_domain", "email.tuxixilax.cfd")
 CF_EMAIL_DOMAIN = _config.get("cf_email_domain", "tuxixilax.cfd")
 CF_ADMIN_PASSWORD = _config.get("cf_admin_password", "")
@@ -2645,7 +2645,7 @@ def _test_moemail(api_url: str, api_key: str, domain: str, proxy: str = "") -> t
         test_name = "testconn" + secrets.token_hex(4)
         url = api_url.rstrip("/") + "/api/emails/generate"
         headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
-        payload = {"name": test_name, "expiryTime": 3600000, "domain": domain}
+        payload = {"name": test_name, "expiryTime": 0, "domain": domain}
         session = create_session()
         if proxy:
             session.proxies = {"http": proxy, "https": proxy}
